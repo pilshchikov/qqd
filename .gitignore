@@ -1,0 +1,39 @@
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+
+# Built binaries (only at the repo root; internal/qqd is the Go package directory and
+# must NOT be ignored - the bare `qqd` line would match it everywhere otherwise).
+/qqd
+*.exe
+
+# Go test/build artifacts
+*.test
+*.out
+coverage.*
+dist/
+build/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Python (demo backend)
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Node (any frontend tooling)
+node_modules/
+
+# Local env files (allow examples)
+.env
+.env.*
+!.env.example
+!*.env.example
+
+# Local scratch/test deploys
+test-deploy/

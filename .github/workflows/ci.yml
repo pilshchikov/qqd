@@ -1,0 +1,25 @@
+name: CI
+on:
+  pull_request:
+    branches: [main, master]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: Build
+        run: go build ./cmd/qqd
+      - name: Test
+        run: go test ./... -count=1 -race
+      - name: Vet
+        run: go vet ./...
+      - name: Generated CLI docs are up to date
+        run: |
+          ./qqd docs -o docs/cli-reference.md
+          if ! git diff --exit-code docs/cli-reference.md; then
+            echo "::error::docs/cli-reference.md is out of date. Run './qqd docs -o docs/cli-reference.md' and commit the result."
+            exit 1
+          fi

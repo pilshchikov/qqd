@@ -1,0 +1,417 @@
+.TH QD 1 "February 2026" "qqd" "User Commands"
+.SH NAME
+qqd \- deploy services to VMs using Podman
+.SH SYNOPSIS
+.B qqd
+[\-\-help]
+.br
+.B qqd
+.I command
+[\fIoptions\fR]
+.SH DESCRIPTION
+\fBqqd\fR is a deployment CLI for multi-service projects. It reads a config file (YAML,
+JSON, or HOCON) and deploys services to one or more SSH targets using Podman
+with systemd or direct lifecycle management.
+.PP
+When an \fBexpose\fR block is configured, qqd automatically manages a reverse proxy
+container on the target for HTTP routing, TCP passthrough, TLS termination,
+and load balancing. By default, Traefik v3.6 is used. The proxy layer is pluggable
+via the \fBProxyProvider\fR interface \(em Traefik can be replaced with Nginx, Caddy,
+HAProxy, or any other reverse proxy. The proxy image is pulled and configured
+automatically \(em no manual setup needed. If no \fBexpose\fR block is present,
+no proxy is used.
+.SH COMMANDS
+.TP
+.B plan
+Show deployment plan without executing. Displays per-target service breakdown
+with images, build actions, deployment modes, and environment variables
+(secrets are automatically redacted).
+.TP
+.B init
+First-time setup on target(s): clone repo, ensure dirs, build/pull images, install systemd units and start services.
+.TP
+.B deploy
+Idempotent deploy: build/pull missing images, start unstarted services, skip already-running ones.
+Shows a plan and asks for confirmation before proceeding. Use \fB\-\-approve\fR to skip the prompt.
+Use \fB\-\-dry-run\fR to show the plan without executing any changes.
+When run without service arguments (full deploy), services removed from the config
+are automatically stopped and their unit files deleted. Partial deploys
+(e.g. \fBqqd deploy server\fR) leave other services untouched.
+Each deploy saves a release record. If the deploy fails during the install/restart
+phase, qqd automatically attempts to roll back to the previous release.
+.TP
+.B build
+Build/pull images only without installing or restarting services.
+.TP
+.B update
+Bump/set image version(s) and redeploy updated services. Without service args, bumps all.
+Shows a plan and asks for confirmation before proceeding. Use \fB\-\-approve\fR to skip the prompt.
+.TP
+.B status
+Show service state, image, creation time, and uptime per target.
+Output format: \fBimage (YYYY-MM-DD HH:MM:SS UTC, up Xh Ym)\fR.
+Use \fB\-\-output json\fR for machine-readable JSON output.
+.TP
+.B logs
+Stream container logs. Without service args, streams all
+services. Replicated services stream all replicas. Multiple containers are
+prefixed with the container name.
+.TP
+.B rollback
+Restore the previous release on the target. Without a service name, rolls back
+all services. With a service name (e.g. \fBqqd rollback server\fR), rolls back
+only that service. Previous release images are pulled if not already present.
+The rollback itself is saved as a new release in the history.
+.PP
+\fBNote:\fR \fBdeploy\fR and \fBupdate\fR automatically attempt to roll back to
+the latest successful release when the install/restart phase fails. If no
+previous release exists or the rollback fails, the original error is reported.
+Auto-rollback is skipped on user interruption (Ctrl+C).
+.TP
+.B history
+Show deployment release history per target. Lists recent releases with IDs,
+timestamps, and service-to-image mappings. The most recent release is marked.
+.TP
+.B stop
+Stop service units.
+.TP
+.B start
+Start service units.
+.TP
+.B destroy
+Stop/disable project units and remove generated unit files.
+.TP
+.B clean
+Remove project containers and unused images from targets.
+.TP
+.B doctor
+Run diagnostic checks on deployment targets. Checks SSH connectivity, container
+runtime availability (Podman), systemd user session, unit directory,
+disk space, and user lingering. Returns non-zero if any check
+reports an error.
+.TP
+.B validate
+Check config for errors without deploying. Validates service dependencies,
+circular deps, port ranges, TLS completeness, health check port inference,
+build strategy requirements, and mutable image tag warnings.
+.TP
+.B import
+Convert a Docker Compose file to a qqd config file.
+.TP
+.B migrate
+Migrate a running Compose/Swarm stack to Podman-backed qqd.
+.TP
+.B convert
+Convert a qqd config between formats (HOCON, YAML, JSON).
+.TP
+.B man
+Open this manual page.
+.TP
+.B docs
+Generate command documentation (Markdown) to stdout or a file.
+.TP
+.B help
+Show command help.
+.SH OPTIONS
+.TP
+.B \-c \fIconfig\fR
+Path to a config file. Can be specified multiple times; each subsequent file is
+deep-merged on top of the previous ones (later values override earlier ones).
+Example: \fB-c app.yaml -c secrets.yaml\fR.
+.TP
+.B \-t \fItarget\fR
+Optional target name. If omitted, command runs on all targets.
+.TP
+.B \-\-rebuild
+Force rebuilding images even when they already exist on the target.
+By default, existing images are skipped.
+.TP
+.B \-\-approve
+Skip the interactive confirmation prompt (for CI/scripts).
+Applies to \fBdeploy\fR and \fBupdate\fR commands.
+.TP
+.B \-\-no-build
+Skip all image builds. Applies to \fBdeploy\fR.
+.TP
+.B \-\-config-only
+Update config and restart services without syncing or building.
+Applies to \fBdeploy\fR.
+.TP
+.B \-\-dry-run
+Show the deployment plan without executing any changes.
+Applies to \fBdeploy\fR.
+.TP
+.B \-\-output \fIjson\fR
+Machine-readable output format for \fBstatus\fR command.
+.TP
+.B \-h, \-\-help
+Show help for the command.
+.TP
+.B \-\-format \fImarkdown\fR
+Documentation output format for \fBqqd docs\fR (currently markdown only).
+.TP
+.B \-o, \-\-output \fIpath\fR
+Write generated docs to a file for \fBqqd docs\fR.
+.SH LOCAL TARGETS
+Set \fBhost = "local"\fR in a target definition to execute commands on the
+local machine instead of over SSH. The \fBuser\fR and \fBssh_key\fR fields
+are not required for local targets.
+.SH CONFIG
+\fBqqd\fR reads YAML, JSON, or HOCON config files. Format is auto-detected from the file
+extension. The config defines services, targets, and an optional reverse proxy via the
+per-target \fBexpose\fR block.
+.SS Expose (Reverse Proxy)
+The \fBexpose\fR block is defined inside each target and configures host-port listeners.
+Top-level keys are host port numbers. Traefik is used as the reverse proxy.
+Different targets can have different expose configurations.
+.PP
+\fBHTTP routing\fR \(em map value with path \(-> service:port routes:
+.RS
+.nf
+targets {
+  prod {
+    host = "192.0.2.10"
+    user = "ec2-user"
+    repo_dir = "/home/ec2-user/app"
+    expose {
+      9999 {
+        "/api/" = "server:8080"
+        "/files/" = "files:9998"
+        "/" = "frontend:80"
+      }
+    }
+  }
+}
+.fi
+.RE
+.PP
+\fBTCP passthrough\fR \(em string value for raw TCP forwarding:
+.RS
+.nf
+targets {
+  prod {
+    expose {
+      5432 = "db:5432"
+      8428 = "victoria:8428"
+    }
+  }
+}
+.fi
+.RE
+.PP
+\fBHTTP with TLS\fR \(em add a \fBtls\fR sub-key inside an HTTP entry:
+.RS
+.nf
+targets {
+  prod {
+    expose {
+      80 {
+        "/" = "server:8080"
+        tls {
+          port = 443
+          certs_dir = "${CERTS_DIR}"
+          server_name = "example.com"
+        }
+      }
+    }
+  }
+}
+.fi
+.RE
+.PP
+\fBTraefik dashboard\fR \(em expose Traefik's built-in dashboard on a host port:
+.RS
+.nf
+targets {
+  prod {
+    expose {
+      dashboard = 1111
+      80 {
+        "/" = "server:8080"
+      }
+    }
+  }
+}
+.fi
+.RE
+.PP
+The dashboard is accessible at \fBhttp://<host>:1111\fR and maps to Traefik's internal
+API port (8080). Set \fBdashboard = 0\fR or remove the key to disable.
+Adding or removing the dashboard triggers a proxy container restart on deploy.
+.PP
+\fBRules:\fR
+.RS
+.IP \(bu 2
+\fBexpose\fR is defined per-target inside each target block
+.IP \(bu 2
+Top-level keys = host port numbers
+.IP \(bu 2
+String target format: "service_name:container_port"
+.IP \(bu 2
+Map value = HTTP entry with path routes
+.IP \(bu 2
+String value = TCP passthrough
+.IP \(bu 2
+\fBtls\fR sub-key inside HTTP entries for HTTPS termination
+.IP \(bu 2
+\fBdashboard = <port>\fR enables Traefik's web UI on the given host port
+.RE
+.PP
+When the \fBexpose\fR block is present, qqd generates:
+.RS
+.IP \(bu 2
+A static Traefik config at \fB~/.config/qqd/<project>/traefik.yml\fR
+.IP \(bu 2
+A dynamic routes config at \fB~/.config/qqd/<project>/dynamic/routes.yml\fR
+.IP \(bu 2
+A \fB<project>-proxy\fR container (traefik:v3.6) that publishes the configured ports
+.RE
+.PP
+Dynamic route config changes are auto-reloaded by Traefik without restarting the proxy.
+Entrypoint changes (adding/removing host ports) and proxy Quadlet changes
+(e.g. adding/removing dashboard) trigger a proxy restart.
+.SS Deploy Hooks
+Project-level and per-service hooks run shell commands at deployment boundaries.
+.RS
+.nf
+hooks {
+    pre_deploy = "echo starting deploy"
+    post_deploy = "./notify.sh"
+    pre_build = "echo preparing build"
+    post_build = "echo build complete"
+}
+services {
+    server {
+        image = "ghcr.io/acme/server:1.0"
+        hooks {
+            pre_build = "echo building server"
+            post_build = "echo server built"
+        }
+    }
+}
+.fi
+.RE
+.PP
+Project hooks: \fBpre_deploy\fR, \fBpost_deploy\fR, \fBpre_build\fR, \fBpost_build\fR.
+Service hooks: \fBpre_build\fR, \fBpost_build\fR.
+Hook failure aborts the deployment with a descriptive error.
+Hooks run on the appropriate executor (target for deploy/github-actions, build host for build-host strategy).
+.SS Env Files
+Load environment variables from files using \fBenv_file\fR at project or service level:
+.RS
+.nf
+env_file = ".env"
+env_file = [".env", ".env.prod"]
+.fi
+.RE
+.PP
+Multiple files use last-wins precedence (later files override earlier ones).
+Explicit \fBenv {}\fR values always take priority over file values.
+Supports \fBKEY=value\fR, quoted values, \fB# comments\fR, and \fBexport\fR prefix.
+.SS Build Strategies
+The \fBbuild\fR block configures where images are built:
+.RS
+.nf
+build {
+    strategy = "local"          # default: build on the target itself
+}
+build {
+    strategy = "build-host"     # build on a dedicated build server
+    host = "192.0.2.15"
+    user = "builder"
+    ssh_key = "~/.ssh/build-key"
+}
+build {
+    strategy = "github-actions" # pull pre-built images (built by CI)
+}
+.fi
+.RE
+.PP
+Build config can be set at project level and overridden per-target.
+Target build config is merged with project build config (target values override).
+.SS Release History
+Each deploy automatically saves a release record mapping service names to images.
+Records are stored per target at \fB~/.config/qqd/<project>/releases/<id>.json\fR.
+The last 10 releases are kept (older ones are trimmed automatically).
+Use \fBqqd history\fR to view and \fBqqd rollback\fR to restore a previous release.
+.SS Health Checks
+Health checks use an object form with explicit path and port:
+.RS
+.nf
+health { path = "/api/health", port = 8080 }
+.fi
+.RE
+.PP
+A string shorthand is also supported (port must be specified in the object form
+if the health check needs a specific port):
+.RS
+.nf
+health = "/api/health"
+.fi
+.RE
+.PP
+When configured, containers get a health check that enables rolling restarts
+for replicated services.
+.SH FILES
+.TP
+\fB~/.config/containers/systemd/\fR
+Generated unit files on targets.
+.TP
+\fB~/.config/qqd/<project>/traefik.yml\fR
+Generated Traefik static config on targets.
+.TP
+\fB~/.config/qqd/<project>/dynamic/routes.yml\fR
+Generated Traefik dynamic routes config on targets.
+.TP
+\fB~/.config/qqd/<project>/releases/<id>.json\fR
+Release history records on targets (one per deploy/rollback).
+.TP
+\fB~/.local/bin/qqd\fR
+Installed executable path (via install.sh).
+.TP
+\fB~/.local/share/man/man1/qqd.1\fR
+Installed manual page path (via install.sh).
+.SH EXAMPLES
+.TP
+qqd plan -c app.yaml
+Preview what deploy would do.
+.TP
+qqd deploy -c app.yaml
+Deploy all services to all targets.
+.TP
+qqd deploy -c app.yaml --dry-run
+Show plan without executing.
+.TP
+qqd deploy -c app.yaml -t main server
+Deploy a single service on one target.
+.TP
+qqd update -c app.yaml server
+Auto-bump server image tag and deploy.
+.TP
+qqd status -c app.yaml --output json
+Machine-readable status output.
+.TP
+qqd rollback -c app.yaml
+Restore previous release on all targets.
+.TP
+qqd rollback -c app.yaml server
+Rollback only the server service.
+.TP
+qqd history -c app.yaml
+Show release history.
+.TP
+qqd doctor -c app.yaml
+Run diagnostic checks on targets.
+.TP
+qqd validate -c app.yaml
+Check config for errors.
+.TP
+qqd help deploy
+Show usage for deploy command.
+.TP
+qqd docs -o docs/CLI.md
+Generate Markdown command reference into a file.
+.SH SEE ALSO
+.BR man (1),
+.BR podman (1),
+.BR systemd (1)
