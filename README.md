@@ -8,12 +8,6 @@ Deploy containerized apps to your own VMs over SSH. `qqd` manages Podman service
 
 One config file. One command. Your services are live.
 
-```
-qqd deploy -c app.yaml
-```
-
-That command is the deploy flow, not just a container restart:
-
 ```text
 qqd deploy -c app.yaml
     |
