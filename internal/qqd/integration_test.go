@@ -482,7 +482,7 @@ func TestIntegrationTCPPassthroughNotSlotted(t *testing.T) {
 	assertUnitActive(t, ctx, exec, integProject+"-web.service")
 	assertUnitActive(t, ctx, exec, integProject+"-db.service")
 
-	// Deploy with changed images — db should use direct restart, not slot-based deploy
+	// Deploy with changed images — db should restart in place, not use a slot
 	cfg2 := cfg
 	cfg2.Services = map[string]ServiceConfig{
 		"web": {Image: "docker.io/library/httpd:2.4-alpine"},

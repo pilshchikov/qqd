@@ -121,7 +121,7 @@ services:
   db:
     image: "docker.io/library/postgres:16.1"
     volumes:
-      - "${DB_PATH}:/var/lib/postgresql/data:z,U"
+      - "${DB_PATH}:/var/lib/postgresql/data"
     env:
       POSTGRES_PASSWORD: "${PG_PASSWORD}"
   server:

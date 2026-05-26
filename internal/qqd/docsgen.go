@@ -74,9 +74,9 @@ func commandSpecs() []commandSpec {
 		{
 			Name:    "deploy",
 			Usage:   "qqd deploy -c <config> [-c <overlay>...] [-t <target>] [--rebuild] [--no-build] [--approve] [--dry-run] [--config-only] [--force-unlock] [services...]",
-			Summary: "idempotent deploy: build/pull missing images and restart changed services",
+			Summary: "idempotent deploy: build/pull missing images and apply changed services",
 			Details: []string{
-				"idempotent: only builds/pulls missing images, only restarts changed services",
+				"idempotent: only builds/pulls missing images, only applies changed services",
 				"",
 				"shows a plan and asks for confirmation before proceeding.",
 				"use --approve to skip the confirmation prompt (for CI/scripts).",
@@ -105,7 +105,7 @@ func commandSpecs() []commandSpec {
 				"    |     partial deploy: only replica/mode changes for targeted services)",
 				"    |-- detect config changes (unit files + proxy container)",
 				"    |-- systemctl start <all units>",
-				"    |-- systemctl restart <changed units only>",
+				"    |-- apply changed services (slot, rolling, or restart in place)",
 				"    '-- verify: systemctl is-active <each unit>",
 				"",
 				"  if install/restart fails and a previous release exists,",
@@ -560,7 +560,7 @@ Defined inside: services { <name> { ... } }
 | health | object or string | no | — | Health check: { path = "/health", port = 8080 } or "/health" |
 | resources | object | no | — | Resource limits: { cpus = "2", memory = "1g" } |
 | depends_on | array of strings | no | [] | Service names to start before this one |
-| volumes | array of strings | no | [] | Bind mounts: ["/host:/container:opts"] |
+| volumes | array of strings | no | [] | Bind mounts. Write simple host:container paths; qqd adds :z for host-path mounts and adds :U only for non-root container users. Existing flags are respected |
 | command | string or array | no | — | Override entrypoint. String = single arg, array = multiple |
 | user | string | no | — | Container user (e.g. "1000:1000") |
 | startup_delay | integer | no | 5 | Seconds to wait when no health check configured |

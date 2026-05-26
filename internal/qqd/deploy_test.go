@@ -17,6 +17,7 @@ type mockExecutor struct {
 	commands      []string
 	existingImage map[string]bool
 	imageIDs      map[string]string // tag -> image ID
+	imageUsers    map[string]string // tag -> image Config.User
 	buildCounter  int               // incremented on each build to generate new IDs
 	copyFromCalls [][2]string
 	copyToCalls   [][2]string
@@ -38,10 +39,51 @@ func newMockExecutor(id string) *mockExecutor {
 		id:            id,
 		existingImage: map[string]bool{},
 		imageIDs:      map[string]string{},
+		imageUsers:    map[string]string{},
 		failCmds:      map[string]int{},
 		healthStatus:  map[string]string{},
 		files:         map[string]string{},
 		containers:    map[string]containerSnap{},
+	}
+}
+
+func TestAnnotateVolumeOwnership(t *testing.T) {
+	exec := newMockExecutor("local")
+	exec.imageUsers["ghcr.io/acme/app:1"] = "1000:1000"
+	exec.imageUsers["docker.io/library/postgres:16"] = "root"
+
+	app := &App{Runtime: PodmanRuntime{}}
+	services := map[string]ServiceConfig{
+		"app": {
+			Image:   "ghcr.io/acme/app:1",
+			Volumes: []string{"/srv/app:/app/data"},
+		},
+		"db": {
+			Image:   "docker.io/library/postgres:16",
+			Volumes: []string{"/srv/db:/var/lib/postgresql/data"},
+		},
+		"worker": {
+			Image:   "ghcr.io/acme/worker:1",
+			User:    "1001:1001",
+			Volumes: []string{"/srv/worker:/data"},
+		},
+		"stateless": {
+			Image: "ghcr.io/acme/stateless:1",
+		},
+	}
+
+	got := app.annotateVolumeOwnership(context.Background(), exec, services)
+	if !got["app"].volumeNeedsU {
+		t.Fatal("image USER with non-root uid should enable :U")
+	}
+	if got["db"].volumeNeedsU {
+		t.Fatal("root image USER should not enable :U")
+	}
+	if !got["worker"].volumeNeedsU {
+		t.Fatal("explicit non-root service user should enable :U")
+	}
+	if got["stateless"].volumeNeedsU {
+		t.Fatal("services without volumes do not need :U annotation")
 	}
 }
 
@@ -82,6 +124,15 @@ func (m *mockExecutor) Run(_ context.Context, cmd string) (string, error) {
 			}
 		}
 		return "", errors.New("missing image")
+	}
+	// Image config user lookup: podman/docker image inspect --format '{{.Config.User}}'
+	if strings.Contains(cmd, "image inspect --format '{{.Config.User}}'") {
+		for tag, user := range m.imageUsers {
+			if strings.Contains(cmd, tag) {
+				return user + "\n", nil
+			}
+		}
+		return "\n", nil
 	}
 	// Image ID lookup: podman/docker image inspect --format '{{.Id}}'
 	if strings.Contains(cmd, "podman image inspect") || strings.Contains(cmd, "docker image inspect") {
@@ -1814,7 +1865,7 @@ func TestDirectRestartNonExposed(t *testing.T) {
 
 	// Should use simple systemctl restart (not slot-based deploy)
 	if !strings.Contains(cmds, "systemctl --user restart 'proj-server.service'") {
-		t.Fatalf("non-exposed service should use direct restart:\n%s", cmds)
+		t.Fatalf("non-exposed service should restart in place:\n%s", cmds)
 	}
 
 	// Standard (non-slotted) container should exist

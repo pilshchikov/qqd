@@ -55,7 +55,7 @@ SSH to target
 
 ### deploy
 
-Idempotent deploy: build/pull only missing images, restart only changed services. Acquires the deploy lock; pass `--force-unlock` to override a stale lock.
+Idempotent deploy: build/pull only missing images, apply changed services. Acquires the deploy lock; pass `--force-unlock` to override a stale lock.
 
 Shows a plan and asks for confirmation before proceeding. Use `--approve` to skip. Use `--dry-run` to show the plan without executing any changes. Use `--no-build` to skip all image builds. Use `--config-only` to update config and restart services without syncing or building.
 

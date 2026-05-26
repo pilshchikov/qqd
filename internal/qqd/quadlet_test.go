@@ -25,7 +25,7 @@ func TestRenderContainerBuiltService(t *testing.T) {
 		"Image=ghcr.io/acme/report/server:1.44",
 		"Network=report.network",
 		"Environment=DB_URL=db:5432",
-		"Volume=/data:/app/data",
+		"Volume=/data:/app/data:z",
 		`Exec="python server.py"`,
 	}
 	for _, needle := range wantContains {
@@ -53,6 +53,51 @@ func TestRenderContainerThirdParty(t *testing.T) {
 	// No PublishPort
 	if strings.Contains(got, "PublishPort") {
 		t.Fatalf("should not contain PublishPort:\n%s", got)
+	}
+}
+
+func TestEnsureVolumeFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		addU bool
+		want string
+	}{
+		{name: "simple absolute bind", in: "/host/data:/container/data", want: "/host/data:/container/data:z"},
+		{name: "non-root bind adds ownership flag", in: "/host/data:/container/data", addU: true, want: "/host/data:/container/data:z,U"},
+		{name: "keeps explicit options", in: "/host/data:/container/data:ro", want: "/host/data:/container/data:ro,z"},
+		{name: "explicit options add ownership when needed", in: "/host/data:/container/data:ro", addU: true, want: "/host/data:/container/data:ro,U,z"},
+		{name: "keeps existing flags", in: "/host/data:/container/data:rw,U,z", want: "/host/data:/container/data:rw,U,z"},
+		{name: "keeps private relabel flag", in: "/host/data:/container/data:Z", addU: true, want: "/host/data:/container/data:Z,U"},
+		{name: "relative bind", in: "./data:/container/data", want: "./data:/container/data:z"},
+		{name: "env bind", in: "${DB_PATH}:/var/lib/postgresql/data", want: "${DB_PATH}:/var/lib/postgresql/data:z"},
+		{name: "named volume unchanged", in: "pgdata:/var/lib/postgresql/data", want: "pgdata:/var/lib/postgresql/data"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ensureVolumeFlags(tc.in, tc.addU); got != tc.want {
+				t.Fatalf("ensureVolumeFlags(%q, %v) = %q, want %q", tc.in, tc.addU, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUserNeedsVolumeOwnershipMapping(t *testing.T) {
+	tests := []struct {
+		user string
+		want bool
+	}{
+		{"", false},
+		{"root", false},
+		{"0", false},
+		{"0:0", false},
+		{"1000:1000", true},
+		{"app", true},
+	}
+	for _, tc := range tests {
+		if got := userNeedsVolumeOwnershipMapping(tc.user); got != tc.want {
+			t.Fatalf("userNeedsVolumeOwnershipMapping(%q) = %v, want %v", tc.user, got, tc.want)
+		}
 	}
 }
 
@@ -106,7 +151,7 @@ func TestRenderReplicaContainer(t *testing.T) {
 		"After=proj-db.service",
 		"HealthCmd=curl -sf http://localhost:8080/api/health || exit 1",
 		"Environment=FOO=bar",
-		"Volume=/data:/app/data",
+		"Volume=/data:/app/data:z",
 	}
 	for _, needle := range wantContains {
 		if !strings.Contains(got, needle) {
@@ -116,6 +161,19 @@ func TestRenderReplicaContainer(t *testing.T) {
 	// Replicas should not have PublishPort
 	if strings.Contains(got, "PublishPort") {
 		t.Fatalf("replica should not have PublishPort:\n%s", got)
+	}
+}
+
+func TestRenderReplicaContainerAddsOwnershipFlagWhenAnnotated(t *testing.T) {
+	svc := ServiceConfig{
+		Image:        "ghcr.io/acme/server:1.0",
+		Replicas:     3,
+		Volumes:      []string{"/data:/app/data"},
+		volumeNeedsU: true,
+	}
+	got := renderReplicaContainer("proj", "server", 2, svc)
+	if !strings.Contains(got, "Volume=/data:/app/data:z,U") {
+		t.Fatalf("non-root annotated service should get :U volume flag:\n%s", got)
 	}
 }
 

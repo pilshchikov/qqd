@@ -76,7 +76,7 @@ Defined inside: services { <name> { ... } }
 | health | object or string | no | — | Health check: { path = "/health", port = 8080 } or "/health" |
 | resources | object | no | — | Resource limits: { cpus = "2", memory = "1g" } |
 | depends_on | array of strings | no | [] | Service names to start before this one |
-| volumes | array of strings | no | [] | Bind mounts: ["/host:/container:opts"] |
+| volumes | array of strings | no | [] | Bind mounts. Write simple host:container paths; qqd adds :z for host-path mounts and adds :U only for non-root container users. Existing flags are respected |
 | command | string or array | no | — | Override entrypoint. String = single arg, array = multiple |
 | user | string | no | — | Container user (e.g. "1000:1000") |
 | startup_delay | integer | no | 5 | Seconds to wait when no health check configured |

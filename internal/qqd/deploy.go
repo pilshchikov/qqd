@@ -393,6 +393,8 @@ func targetOrder(cfg ProjectConfig, targetName string) []string {
 // using `podman run --restart=...` plus qqd.*
 // labels. Otherwise the existing systemd-backed path runs unchanged.
 func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, targetExec Executor, firstInit bool, changedImages []string, fullDeploy bool) error {
+	eff.Services = a.annotateVolumeOwnership(ctx, targetExec, eff.Services)
+
 	sel := a.lifecycleFor(ctx, eff.Target, targetExec)
 	if sel.Backend == "direct" {
 		fmt.Fprintf(a.Stdout, "  %s lifecycle: %s (%s)\n", dim("backend"), bold("direct"), dim(sel.Reason))
@@ -403,6 +405,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	if err != nil {
 		return err
 	}
+	fullEff.Services = a.annotateVolumeOwnership(ctx, targetExec, fullEff.Services)
 	allServices := fullEff.Services
 
 	// For partial deploys, filter expose config to only include services that
@@ -663,6 +666,23 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	return nil
 }
 
+func (a *App) annotateVolumeOwnership(ctx context.Context, exec Executor, services map[string]ServiceConfig) map[string]ServiceConfig {
+	annotated := make(map[string]ServiceConfig, len(services))
+	for name, svc := range services {
+		if len(svc.Volumes) > 0 {
+			user := svc.User
+			if strings.TrimSpace(user) == "" {
+				if imageUser, ok := imageConfigUser(ctx, exec, svc.Image, a.rt()); ok {
+					user = imageUser
+				}
+			}
+			svc.volumeNeedsU = userNeedsVolumeOwnershipMapping(user)
+		}
+		annotated[name] = svc
+	}
+	return annotated
+}
+
 // attemptAutoRollback tries to restore the previous release after a deploy failure.
 // Best-effort: if the rollback itself fails, the original deploy error is still
 // returned to the caller. Skipped when no previous release exists or when the
@@ -762,7 +782,7 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 //   - exposed + non-replicated → slot-based deploy (zero downtime)
 //   - exposed + replicated → rolling restart with drain (zero downtime)
 //   - non-exposed + replicated + health → rolling restart (existing)
-//   - otherwise → direct systemctl restart
+//   - otherwise → restart in place
 //
 // The special "__proxy__" sentinel triggers a proxy restart (only when static config changed).
 func (a *App) restartChangedServices(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, changed []string, allServices map[string]ServiceConfig, activeSlots map[string]string) (map[string]bool, error) {

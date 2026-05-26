@@ -35,7 +35,7 @@ usage:
 
 - `plan`: show deployment plan without executing
 - `init`: first-time setup on target(s)
-- `deploy`: idempotent deploy: build/pull missing images and restart changed services
+- `deploy`: idempotent deploy: build/pull missing images and apply changed services
 - `build`: build/pull images only, no deploy/restart
 - `update`: bump/set image version(s) and redeploy updated services
 - `status`: show service state/image/uptime on target(s)
@@ -109,9 +109,9 @@ first-time setup on target(s)
 qqd deploy -c <config> [-c <overlay>...] [-t <target>] [--rebuild] [--no-build] [--approve] [--dry-run] [--config-only] [--force-unlock] [services...]
 ```
 
-idempotent deploy: build/pull missing images and restart changed services
+idempotent deploy: build/pull missing images and apply changed services
 
-- idempotent: only builds/pulls missing images, only restarts changed services
+- idempotent: only builds/pulls missing images, only applies changed services
 - 
 - shows a plan and asks for confirmation before proceeding.
 - use --approve to skip the confirmation prompt (for CI/scripts).
@@ -140,7 +140,7 @@ idempotent deploy: build/pull missing images and restart changed services
 -     |     partial deploy: only replica/mode changes for targeted services)
 -     |-- detect config changes (unit files + proxy container)
 -     |-- systemctl start <all units>
--     |-- systemctl restart <changed units only>
+-     |-- apply changed services (slot, rolling, or restart in place)
 -     '-- verify: systemctl is-active <each unit>
 - 
 -   if install/restart fails and a previous release exists,

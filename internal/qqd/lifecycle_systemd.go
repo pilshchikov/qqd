@@ -141,7 +141,7 @@ func normalizeSystemdState(s string) string {
 // serviceConfigFromSpec rebuilds the ServiceConfig shape that the Quadlet
 // renderers expect.
 func serviceConfigFromSpec(spec ContainerSpec) ServiceConfig {
-	return ServiceConfig{
+	cfg := ServiceConfig{
 		Image:     spec.Image,
 		User:      spec.User,
 		Command:   append([]string(nil), spec.Command...),
@@ -152,6 +152,8 @@ func serviceConfigFromSpec(spec ContainerSpec) ServiceConfig {
 		Health:    spec.Health,
 		Resources: spec.Resources,
 	}
+	cfg.volumeNeedsU = spec.VolumeNeedsU
+	return cfg
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

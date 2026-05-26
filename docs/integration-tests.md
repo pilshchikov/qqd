@@ -42,7 +42,7 @@ Tests use the project name `qqd-test` and a published port range starting at `19
 |---|---|
 | `TestIntegrationInitDeploy` | Full init -> deploy -> idempotent re-deploy with httpd + alpine |
 | `TestIntegrationZeroDowntime` | Single-replica HTTP service blue-green slot switch |
-| `TestIntegrationTCPPassthroughNotSlotted` | TCP-exposed service uses direct restart, not slot |
+| `TestIntegrationTCPPassthroughNotSlotted` | TCP-exposed service restarts in place, not with a slot |
 | `TestIntegrationMultiServiceHTTPRouting` | Path-based routing across multiple services |
 | `TestIntegrationDependsOn` | systemd dependencies between services |
 | `TestIntegrationDestroy` | `qqd destroy` removes units + containers cleanly |

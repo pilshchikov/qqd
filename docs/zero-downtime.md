@@ -9,7 +9,7 @@ When a service's image changes, qqd automatically selects a deployment strategy 
 | HTTP-exposed, non-replicated | **Blue-green** | Start new container alongside old, switch Traefik, stop old |
 | Exposed, replicated | **Rolling with drain** | Remove replica from Traefik, restart, wait healthy, add back |
 | Non-exposed, replicated + health | **Rolling restart** | Restart one replica at a time, wait healthy |
-| Everything else | **Direct restart** | `systemctl restart` |
+| Everything else | **Restart in place** | Restart the existing service/container instead of running a parallel slot |
 
 ## Blue-Green Deployment
 
@@ -35,7 +35,7 @@ For HTTP-routed non-replicated services, qqd runs two containers alternately - a
 
 ### Applicability
 
-Blue-green only applies to **HTTP-routed** services (path routes in `expose`). TCP passthrough services use direct restart since they typically have stateful or long-lived connections. Services without an `expose` entry also use direct restart.
+Blue-green only applies to **HTTP-routed** services (path routes in `expose`). TCP passthrough services restart in place since they typically have stateful or long-lived connections. Services without an `expose` entry also restart in place.
 
 If a service depends on a blue-green service (`depends_on`), its Quadlet file is automatically updated to reference the active slot unit.
 

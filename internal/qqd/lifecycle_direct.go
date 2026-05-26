@@ -68,6 +68,9 @@ func (l directLifecycle) Install(ctx context.Context, exec Executor, spec Contai
 		parts = append(parts, fmt.Sprintf("-e %s=%s", key, shellQuote(spec.Env[key])))
 	}
 	for _, vol := range spec.Volumes {
+		if spec.Role == "app" {
+			vol = ensureVolumeFlags(vol, spec.VolumeNeedsU)
+		}
 		parts = append(parts, fmt.Sprintf("-v %s", shellQuote(vol)))
 	}
 	if spec.Health.Path != "" && spec.Health.Port != 0 {

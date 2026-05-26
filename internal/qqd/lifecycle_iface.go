@@ -76,6 +76,7 @@ type ContainerSpec struct {
 	ConfigHash  string   // sha256 of the effective spec
 	ImageDigest string   // resolved image ID at deploy time (sha256:...) or empty
 	Runtime     string   // runtime name (informational)
+	VolumeNeedsU bool   // add Podman :U to service host-path volumes
 }
 
 // QqdLabels returns the canonical qqd.* label set used by directLifecycle to

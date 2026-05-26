@@ -46,8 +46,8 @@ func TestDirectLifecycleInstallEmitsPodmanRun(t *testing.T) {
 			t.Errorf("missing %q in commands:\n%s", s, all)
 		}
 	}
-	if !strings.Contains(all, "-v '/srv/data:/data:rw,U'") {
-		t.Errorf("podman volume should keep :U flag:\n%s", all)
+	if !strings.Contains(all, "-v '/srv/data:/data:rw,U,z'") {
+		t.Errorf("podman volume should keep :U flag and add :z:\n%s", all)
 	}
 }
 
@@ -70,6 +70,27 @@ func TestDirectLifecyclePodmanInstallUsesAlwaysRestart(t *testing.T) {
 	all := strings.Join(exec.commands, "\n")
 	if !strings.Contains(all, "podman run -d --restart=always --name 'obs-api'") {
 		t.Fatalf("podman should use --restart=always:\n%s", all)
+	}
+}
+
+func TestDirectLifecycleDoesNotRewriteProxyVolumes(t *testing.T) {
+	exec := newMockExecutor("local")
+	lc := directLifecycle{rt: PodmanRuntime{}}
+	spec := ContainerSpec{
+		Project:   "obs",
+		Service:   "proxy",
+		Container: "obs-proxy",
+		Network:   "obs",
+		Image:     "docker.io/library/traefik:v3.6",
+		Role:      "proxy",
+		Volumes:   []string{"/srv/certs:/etc/certs:ro"},
+	}
+	if err := lc.Install(context.Background(), exec, spec); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	all := strings.Join(exec.commands, "\n")
+	if !strings.Contains(all, "-v '/srv/certs:/etc/certs:ro'") {
+		t.Fatalf("proxy volume should stay explicitly read-only without app defaults:\n%s", all)
 	}
 }
 
@@ -507,16 +528,12 @@ func TestDirectModeExpandsTildeInVolumeMounts(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 	all := strings.Join(targetExec.commands, "\n")
-	// Mock's printf %s "$HOME" returns "" (no special handler). The
-	// fallback uses os.UserHomeDir(), which on the dev host is a real
-	// absolute path. Either way, the literal "~" must NOT survive into
-	// the podman run argument.
-	if strings.Contains(all, "-v '~/state/obs:/data:rw'") {
+	// The literal "~" must not survive into the podman run argument.
+	if strings.Contains(all, "-v '~/state/obs:/data:rw") {
 		t.Fatalf("podman -v must not contain unexpanded ~; got:\n%s", all)
 	}
-	// And it must contain a -v with /data:rw on the right side.
-	if !strings.Contains(all, ":/data:rw'") {
-		t.Fatalf("expected expanded -v ending in :/data:rw; got:\n%s", all)
+	if !strings.Contains(all, ":/data:rw,z'") {
+		t.Fatalf("expected expanded -v ending in :/data:rw,z; got:\n%s", all)
 	}
 }
 

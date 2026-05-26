@@ -85,7 +85,7 @@ func renderContainer(project, service string, cfg ServiceConfig) string {
 		b.WriteString(formatQuadletEnv(key, cfg.Env[key]))
 	}
 	for _, volume := range cfg.Volumes {
-		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume)))
+		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume, cfg.volumeNeedsU)))
 	}
 	if len(cfg.Command) > 0 {
 		b.WriteString(fmt.Sprintf("Exec=%s\n", formatExecArgs(cfg.Command)))
@@ -124,7 +124,7 @@ func renderContainerWithSlot(project, service, slot string, cfg ServiceConfig) s
 		b.WriteString(formatQuadletEnv(key, cfg.Env[key]))
 	}
 	for _, volume := range cfg.Volumes {
-		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume)))
+		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume, cfg.volumeNeedsU)))
 	}
 	if len(cfg.Command) > 0 {
 		b.WriteString(fmt.Sprintf("Exec=%s\n", formatExecArgs(cfg.Command)))
@@ -162,7 +162,7 @@ func renderReplicaContainer(project, service string, replica int, cfg ServiceCon
 		b.WriteString(formatQuadletEnv(key, cfg.Env[key]))
 	}
 	for _, volume := range cfg.Volumes {
-		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume)))
+		b.WriteString(fmt.Sprintf("Volume=%s\n", ensureVolumeFlags(volume, cfg.volumeNeedsU)))
 	}
 	if len(cfg.Command) > 0 {
 		b.WriteString(fmt.Sprintf("Exec=%s\n", formatExecArgs(cfg.Command)))

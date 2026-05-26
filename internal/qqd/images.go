@@ -400,6 +400,35 @@ func imageID(ctx context.Context, exec Executor, image string, rt ...ContainerRu
 	return strings.TrimSpace(out)
 }
 
+func imageConfigUser(ctx context.Context, exec Executor, image string, rt ContainerRuntime) (string, bool) {
+	cmd := "podman"
+	if rt != nil {
+		cmd = rt.Cmd()
+	}
+	out, err := exec.Run(ctx, fmt.Sprintf("%s image inspect --format '{{.Config.User}}' %s 2>/dev/null || true", cmd, shellQuote(image)))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
+}
+
+func userNeedsVolumeOwnershipMapping(user string) bool {
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return false
+	}
+	main := user
+	if i := strings.IndexAny(main, ":."); i >= 0 {
+		main = main[:i]
+	}
+	switch strings.ToLower(main) {
+	case "", "0", "root":
+		return false
+	default:
+		return true
+	}
+}
+
 func imageTag(image string) string {
 	_, tag, ok := splitImageTag(image)
 	if !ok {

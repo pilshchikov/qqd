@@ -9,20 +9,20 @@ import "maps"
 // Fields without a `qqd:` tag are treated as internal and omitted from
 // generated documentation and from `qqd manifest`.
 type ProjectConfig struct {
-	Name       string   `qqd:"key=name;required=yes;desc=Project name. Used as a prefix for every container and network qqd creates."`
-	Repo       string   `qqd:"key=repo;required=conditional;desc=Git repository URL. Required when a service has a dockerfile or context AND sync != upload. Pure image-pull deploys can omit it."`
-	Branch     string   `qqd:"key=branch;required=no;default=main;desc=Git branch to deploy from."`
-	Path       string   `qqd:"key=path;required=no;desc=Subdirectory of the repo where this project lives. Defaults to the repo root."`
-	GHToken    string   `qqd:"key=gh_token;required=no;desc=GitHub token used to inject https credentials into the repo URL. Honors file:: refs and env var names."`
-	Sync       string   `qqd:"key=sync;required=no;default=git;desc=Source sync mode. \"git\" (clone/fetch on target) or \"upload\" (rsync from your machine, respects .gitignore)."`
-	Runtime    string   `qqd:"key=runtime;required=no;default=podman;desc=Container runtime. Only \"podman\" is supported. \"docker\" is rejected."`
-	Proxy      string   `qqd:"key=proxy;required=no;default=traefik;desc=Reverse proxy provider: \"traefik\" or \"caddy\"."`
-	ProxyImage string   `qqd:"key=proxy_image;required=no;desc=Override the proxy container image (otherwise the provider default is used)."`
-	EnvFiles   []string `qqd:"key=env_file;required=no;type=string or array;desc=One or more .env files to load. Later files win."`
-	Build      BuildConfig                `qqd:"key=build;required=no;type=object;desc=Build strategy + resources (see Build section)."`
-	Hooks      HooksConfig                `qqd:"key=hooks;required=no;type=object;desc=Project-level hooks (pre_deploy, post_deploy, pre_build, post_build)."`
-	Services   map[string]ServiceConfig   `qqd:"key=services;required=yes;type=object;desc=Map of service name → ServiceConfig (see Service section)."`
-	Targets    map[string]TargetConfig    `qqd:"key=targets;required=yes;type=object;desc=Map of target name → TargetConfig (see Target section)."`
+	Name       string                   `qqd:"key=name;required=yes;desc=Project name. Used as a prefix for every container and network qqd creates."`
+	Repo       string                   `qqd:"key=repo;required=conditional;desc=Git repository URL. Required when a service has a dockerfile or context AND sync != upload. Pure image-pull deploys can omit it."`
+	Branch     string                   `qqd:"key=branch;required=no;default=main;desc=Git branch to deploy from."`
+	Path       string                   `qqd:"key=path;required=no;desc=Subdirectory of the repo where this project lives. Defaults to the repo root."`
+	GHToken    string                   `qqd:"key=gh_token;required=no;desc=GitHub token used to inject https credentials into the repo URL. Honors file:: refs and env var names."`
+	Sync       string                   `qqd:"key=sync;required=no;default=git;desc=Source sync mode. \"git\" (clone/fetch on target) or \"upload\" (rsync from your machine, respects .gitignore)."`
+	Runtime    string                   `qqd:"key=runtime;required=no;default=podman;desc=Container runtime. Only \"podman\" is supported. \"docker\" is rejected."`
+	Proxy      string                   `qqd:"key=proxy;required=no;default=traefik;desc=Reverse proxy provider: \"traefik\" or \"caddy\"."`
+	ProxyImage string                   `qqd:"key=proxy_image;required=no;desc=Override the proxy container image (otherwise the provider default is used)."`
+	EnvFiles   []string                 `qqd:"key=env_file;required=no;type=string or array;desc=One or more .env files to load. Later files win."`
+	Build      BuildConfig              `qqd:"key=build;required=no;type=object;desc=Build strategy + resources (see Build section)."`
+	Hooks      HooksConfig              `qqd:"key=hooks;required=no;type=object;desc=Project-level hooks (pre_deploy, post_deploy, pre_build, post_build)."`
+	Services   map[string]ServiceConfig `qqd:"key=services;required=yes;type=object;desc=Map of service name → ServiceConfig (see Service section)."`
+	Targets    map[string]TargetConfig  `qqd:"key=targets;required=yes;type=object;desc=Map of target name → TargetConfig (see Target section)."`
 	// InvocationWD is the base directory used to resolve relative paths
 	// inside the config (env_file, ssh_key, file:: refs, build context,
 	// rsync upload base, .gitignore lookup). It is set to the directory
@@ -102,13 +102,14 @@ type ServiceConfig struct {
 	EnvFile      string            `qqd:"key=env_file;required=no;desc=Path to .env file for this service only."`
 	Command      []string          `qqd:"key=command;required=no;type=string or array;desc=Override the image ENTRYPOINT / CMD."`
 	DependsOn    []string          `qqd:"key=depends_on;required=no;default=[];desc=Other service names that must start first."`
-	Volumes      []string          `qqd:"key=volumes;required=no;default=[];desc=Bind mounts. SELinux hosts need :z and (if container user differs from host user) :U flags."`
+	Volumes      []string          `qqd:"key=volumes;required=no;default=[];desc=Bind mounts. Write simple host:container paths; qqd adds :z for host-path mounts and adds :U only for non-root container users. Existing flags are respected."`
 	Env          map[string]string `qqd:"key=env;required=no;default={};type=map string→string;desc=Environment variables. ${VAR} expands from target.env then OS env."`
 	Replicas     int               `qqd:"key=replicas;required=no;default=1;desc=Number of replica containers. Names: <project>-<service>-1..N."`
 	StartupDelay int               `qqd:"key=startup_delay;required=no;default=5;desc=Seconds to wait after start when no health check is configured."`
 	Health       HealthConfig      `qqd:"key=health;required=no;type=object or string;desc=Health check. Either { path: \"/health\", port: 8080 } or shorthand \"/health\" (port inferred from a single HTTP expose route)."`
 	Resources    ResourceConfig    `qqd:"key=resources;required=no;type=object;desc=Resource limits: { cpus: \"2\", memory: \"1g\" }."`
 	Hooks        HooksConfig       `qqd:"key=hooks;required=no;type=object;desc=Per-service hooks: pre_build, post_build."`
+	volumeNeedsU bool
 }
 
 // ServiceOverride contains per-target overrides for one service.

@@ -154,13 +154,20 @@ Find the SSH port:
 podman machine inspect --format '{{.SSHConfig.Port}}'
 ```
 
-## SELinux Hosts (RHEL, AlmaLinux, Fedora)
+## Volume Mounts
 
-When SELinux is enforcing, bind-mounted volumes need the `:z` flag for shared relabeling. Volumes where the container user differs from the host user also need `:U` for ownership mapping:
+For service volumes, write the simple mount you mean:
 
 ```hocon
-volumes = ["/host/data:/container/data:z,U"]
+volumes = ["/host/data:/container/data"]
 ```
+
+qqd adds Podman bind flags for host-path mounts when it renders the container:
+
+- `:z` for shared SELinux relabeling on RHEL, AlmaLinux, and Fedora
+- `:U` only when the service declares a non-root `user` or the image declares a non-root `USER`
+
+If you provide explicit mount options, qqd keeps them and adds only the missing qqd-managed flags. Named volumes are left unchanged. If an image switches to a non-root user only inside its entrypoint, qqd cannot detect that ahead of time; add `:U` explicitly for that service.
 
 ## Podman DNS
 

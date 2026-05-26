@@ -64,7 +64,7 @@ What happens when each step of `deploy` fails:
 | Image pull | Aborts; previous services still running | Check registry auth; check network |
 | Unit file write | Atomic write fails or is incomplete | Should not happen; file a bug |
 | Service start | Auto-rollback to previous image and units | Check `journalctl --user -u <unit>` |
-| Health check timeout | Auto-rollback (slot/rolling) or service marked failed (direct restart) | Inspect logs; verify health endpoint |
+| Health check timeout | Auto-rollback where a previous release exists; otherwise the service is marked failed | Inspect logs; verify health endpoint |
 | Proxy reload | Service is healthy but traffic may be wrong | Restart proxy container manually if stuck |
 | `qqd` killed mid-deploy (Ctrl+C, SIGKILL) | No cleanup runs. Target left in the state of the last completed step | Inspect with `qqd status`; resume with `qqd deploy` (idempotent) |
 

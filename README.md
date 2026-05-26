@@ -16,11 +16,12 @@ qqd deploy -c app.yaml
     |-- build/pull only missing images
     |-- generate unit files, write only changed ones
     |-- start all units (idempotent)
-    |-- restart only changed services:
+    |-- apply changed services:
     |     HTTP-exposed       → blue-green (proxy switch)
     |     replicated         → rolling restart (one at a time)
-    |     with health check  → wait healthy before next
-    |     otherwise          → direct restart
+    |     with health check  → wait healthy before continuing
+    |     otherwise          → restart in place
+    |-- if health checks fail, restore the previous release where possible
     '-- verify all units active
 ```
 
@@ -35,7 +36,7 @@ qqd deploy -c app.yaml
 ## Why qqd
 
 - **Single binary** - one Go binary on your machine, no local runtime dependencies. The target needs SSH, Podman, and shell tooling - see [Setup](docs/setup.md). Two lifecycle backends: systemd (when present) or direct (`podman run --restart=...` with `qqd.*` labels). Auto-selects per target so the same config works on a Linux VM, a macOS laptop with Podman Machine, or a CI runner - see [Lifecycle Backends](docs/lifecycle.md)
-- **Zero-downtime strategies** - blue-green and rolling deploys for HTTP-exposed and replicated services with health checks. Other shapes get a direct restart - see [Safety Model](docs/safety-model.md) for the exact rules
+- **Zero-downtime strategies** - blue-green and rolling deploys for HTTP-exposed and replicated services with health checks. Other shapes restart in place; failed health checks roll back where qqd has a previous release to restore - see [Safety Model](docs/safety-model.md) for the exact rules
 - **YAML, JSON, or HOCON config** - auto-detected by file extension. The YAML parser is a small custom subset (no anchors/multiline scalars/tags); see [YAML Subset](docs/yaml-subset.md) for what's supported
 - **Fully open-source stack** - Podman + optional systemd + Traefik/Caddy
 - **No daemon** - qqd runs locally, SSHs into targets, does its job, exits. Per-target deploy lock prevents concurrent runs from racing
@@ -169,7 +170,7 @@ services:
   db:
     image: "docker.io/library/postgres:16.1"
     volumes:
-      - "${DB_PATH}:/var/lib/postgresql/data:z,U"
+      - "${DB_PATH}:/var/lib/postgresql/data"
     env:
       POSTGRES_PASSWORD: "${PG_PASSWORD}"
   server:
@@ -227,7 +228,7 @@ qqd update -c app.yaml -c secrets.yaml     # bump versions and redeploy
 |---------|-------------|
 | `plan` | Show deployment plan without executing |
 | `init` | First-time setup: clone repo, build images, install Quadlet, start services |
-| `deploy` | Idempotent: build/pull only missing images, restart only changed services |
+| `deploy` | Idempotent: build/pull only missing images, apply changed services |
 | `build` | Build/pull images only, no deploy |
 | `update` | Bump image version(s) in config, then deploy updated services |
 | `status` | Show service state, image, and uptime per target |

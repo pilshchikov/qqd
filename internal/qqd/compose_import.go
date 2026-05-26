@@ -742,9 +742,11 @@ func isAlphaNum(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_'
 }
 
-// ensureVolumeFlags adds :z,U to bind mount volumes that don't already have flags.
-// This is needed for Podman rootless mode (z = SELinux relabel, U = chown to container user).
-func ensureVolumeFlags(vol string) string {
+// ensureVolumeFlags adds qqd-managed Podman bind flags to host-path volume
+// mounts so users can write simple "host:container" mounts. z enables shared
+// SELinux relabeling; U is added only when the service runs as a non-root user.
+// Named volumes and user-supplied flags are left intact.
+func ensureVolumeFlags(vol string, addU bool) string {
 	parts := strings.SplitN(vol, ":", 3)
 	if len(parts) < 2 {
 		return vol // not a bind mount
@@ -756,18 +758,30 @@ func ensureVolumeFlags(vol string) string {
 		return vol
 	}
 	if len(parts) == 3 {
-		// Already has flags - add z,U if not present
+		// Already has flags. Preserve them and add only the qqd-managed
+		// defaults that are missing.
 		flags := parts[2]
-		if !strings.Contains(flags, "U") {
+		if addU && !hasVolumeFlag(flags, "U") {
 			flags += ",U"
 		}
-		if !strings.Contains(flags, "z") && !strings.Contains(flags, "Z") {
+		if !hasVolumeFlag(flags, "z") && !hasVolumeFlag(flags, "Z") {
 			flags += ",z"
 		}
 		return hostPath + ":" + containerPath + ":" + flags
 	}
-	// No flags - add z,U
+	if !addU {
+		return hostPath + ":" + containerPath + ":z"
+	}
 	return hostPath + ":" + containerPath + ":z,U"
+}
+
+func hasVolumeFlag(flags, want string) bool {
+	for _, f := range strings.Split(flags, ",") {
+		if strings.TrimSpace(f) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeImageName adds docker.io/ prefix to short image names
