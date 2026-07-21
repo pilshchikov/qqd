@@ -113,6 +113,11 @@ func (a *App) removeStaleQuadlets(ctx context.Context, project, qdDir string, ne
 	for _, f := range newFiles {
 		newNames[f.Name] = true
 	}
+	// Units still referenced by a retained/written quadlet's After=/Requires=/Wants=
+	// must never be removed, even if their own quadlet isn't in newFiles this pass.
+	// Reaping such a base unit (e.g. a non-slotted db) breaks every unit that
+	// requires it and can take the whole stack down during a partial deploy or rollback.
+	referenced := referencedUnits(newFiles)
 	out, err := exec.Run(ctx, fmt.Sprintf("ls -1 %s 2>/dev/null || true", qdDir))
 	if err != nil {
 		return
@@ -145,10 +150,41 @@ func (a *App) removeStaleQuadlets(ctx context.Context, project, qdDir string, ne
 			continue // service not in this deploy run — leave it alone
 		}
 		unit := strings.TrimSuffix(name, ext) + ".service"
+		if referenced[unit] {
+			continue // still required by a retained unit — removing it would break the dependant
+		}
 		fmt.Fprintf(a.Stdout, "  %s stale unit %s\n", yellow("removing"), dim(unit))
 		exec.Run(ctx, fmt.Sprintf(a.sctl()+" stop %s 2>/dev/null || true", shellQuote(unit)))
 		exec.Run(ctx, fmt.Sprintf("rm -f %s/%s", qdDir, shellQuote(name)))
 	}
+}
+
+// referencedUnits returns the set of systemd unit names referenced by any
+// After=/Requires=/Wants= directive across the given quadlet files. These are
+// the dependencies retained/written units rely on; removing one would break the
+// unit that declares it.
+func referencedUnits(files []QuadletFile) map[string]bool {
+	refs := map[string]bool{}
+	for _, f := range files {
+		for _, line := range strings.Split(f.Content, "\n") {
+			line = strings.TrimSpace(line)
+			var deps string
+			switch {
+			case strings.HasPrefix(line, "After="):
+				deps = strings.TrimPrefix(line, "After=")
+			case strings.HasPrefix(line, "Requires="):
+				deps = strings.TrimPrefix(line, "Requires=")
+			case strings.HasPrefix(line, "Wants="):
+				deps = strings.TrimPrefix(line, "Wants=")
+			default:
+				continue
+			}
+			for _, unit := range strings.Fields(deps) {
+				refs[unit] = true
+			}
+		}
+	}
+	return refs
 }
 
 // contains reports whether needle exists in values.
