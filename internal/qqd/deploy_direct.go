@@ -301,8 +301,7 @@ func (a *App) writeProxyConfigDirect(ctx context.Context, exec Executor, cfg Pro
 		// the in-container path the proxy spec mounts to. The on-host path
 		// is target-scoped; the in-container path stays the same so the
 		// generated static doesn't need rewriting.
-		heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", staticPath, static)
-		if _, err := exec.Run(ctx, heredoc); err != nil {
+		if _, err := exec.Run(ctx, remoteWriteCmd(staticPath, static)); err != nil {
 			return err
 		}
 	}

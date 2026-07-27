@@ -58,8 +58,7 @@ func saveRelease(ctx context.Context, exec Executor, project string, rel Release
 		return err
 	}
 	path := fmt.Sprintf("%s/%s.json", dir, rel.ID)
-	heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%s\nQD_EOF", path, string(data))
-	_, err = exec.Run(ctx, heredoc)
+	_, err = exec.Run(ctx, remoteWriteCmd(path, string(data)))
 	return err
 }
 
@@ -150,6 +149,8 @@ func trimReleases(ctx context.Context, exec Executor, project string) {
 	}
 	dir := fmt.Sprintf(releaseDir, project)
 	for _, rel := range releases[maxReleases:] {
-		exec.Run(ctx, fmt.Sprintf("rm -f %s/%s.json", dir, rel.ID))
+		// rel.ID comes back from a file on the target: quote it so a malformed
+		// or hand-edited release record can't extend the rm command.
+		exec.Run(ctx, fmt.Sprintf("rm -f %s/%s", dir, shellQuote(rel.ID+".json")))
 	}
 }

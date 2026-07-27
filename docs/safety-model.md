@@ -12,6 +12,9 @@ A "guarantee" here means: there is code that enforces this, and the test suite c
 - **SSH host-key verification is on by default.** Connecting to an unknown host fails unless `insecure_host_key: true` is set on the target.
 - **Generated unit files are written atomically.** A unit file is staged to a temp path, then renamed - it is never half-written.
 - **Idempotent deploys.** Running `qqd deploy` against an already-deployed target with no config changes is a no-op (no image rebuild, no service restart).
+- **`qqd` only touches units it owns.** Every generated quadlet file starts with a `# qqd-project=<name>` marker. Cleanup passes (stale-unit removal, `qqd destroy`, `qqd clean`) act on files/containers that resolve to a configured service of this project or carry this project's marker - so two projects whose names share a prefix (`app` and `app-metrics`) never remove each other's units. Files `qqd` never wrote are left alone.
+- **A partial deploy only touches the services it names.** `qqd deploy <service>` - and the auto-rollback after it fails - never removes or stops units of services that were not named.
+- **Remote writes cannot be broken out of.** File content is written with a heredoc whose delimiter is derived from the content, so a value that happens to contain the delimiter cannot truncate the file or run as a shell command on the target.
 - **Plan and `--dry-run` redact secrets.** Values for keys matching common secret patterns (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_KEY`, etc.) are masked. See `internal/qqd/redact.go` for the full pattern list.
 
 ## Best-effort behavior
@@ -92,6 +95,7 @@ What the lock does and does not protect:
 - TLS cert/key files exist if `tls:` is set.
 - Port numbers are valid integers in range.
 - Mutable image tags warn (not error).
+- **Host-port collisions hard-fail.** Only one listener can publish a given host port, so a `dashboard` port or a `tls.port` that reuses another expose entry's port is an error rather than a silently dropped listener.
 - **`proxy: caddy` + raw TCP expose entry hard-fails.** Caddy's built-in `reverse_proxy` is HTTP-only; a raw TCP entry would silently misbehave. See [docs/proxy-caddy.md](proxy-caddy.md).
 
 ### `qqd plan`

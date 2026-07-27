@@ -19,7 +19,7 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 	unitExt := a.rt().UnitExtension()
 
 	// 1. Detect current slot → compute new slot from image hash
-	currentSlot := detectActiveSlot(ctx, exec, project, serviceName, qdDir, unitExt)
+	currentSlot := detectActiveSlot(ctx, exec, project, serviceName, qdDir, unitExt, a.sctl())
 	newSlot := slotHash(svc.Image)
 	if newSlot == currentSlot {
 		// Same image hash — reconcile the current slot content, then restart if needed.
@@ -33,8 +33,7 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 			return nil
 		}
 		if !contentMatches {
-			heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", slotPath, expected)
-			if _, err := exec.Run(ctx, heredoc); err != nil {
+			if _, err := exec.Run(ctx, remoteWriteCmd(slotPath, expected)); err != nil {
 				return fmt.Errorf("rewrite slot %s: %w", currentSlot, err)
 			}
 			if _, err := exec.Run(ctx, a.sctl()+" daemon-reload"); err != nil {
@@ -64,10 +63,9 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 	// 2. Render quadlet with slot, write to target
 	// Rewrite DependsOn to reference active slot units for any slotted deps
 	svc = rewriteDepsForSlots(svc, activeSlots)
-	content := a.rt().RenderContainerWithSlot(project, serviceName, newSlot, svc)
+	content := withProjectMarker(project, a.rt().RenderContainerWithSlot(project, serviceName, newSlot, svc))
 	path := fmt.Sprintf("%s/%s", qdDir, newQuadlet)
-	heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", path, content)
-	if _, err := exec.Run(ctx, heredoc); err != nil {
+	if _, err := exec.Run(ctx, remoteWriteCmd(path, content)); err != nil {
 		return fmt.Errorf("write slot quadlet: %w", err)
 	}
 
@@ -171,8 +169,7 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 				}
 				updated := strings.ReplaceAll(content, oldDep, newDep)
 				if updated != content {
-					heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", depPath, updated)
-					exec.Run(ctx, heredoc)
+					exec.Run(ctx, remoteWriteCmd(depPath, updated))
 					needReload = true
 				}
 			}
@@ -224,18 +221,25 @@ func slotHash(image string) string {
 
 // renderExpectedSlotContent renders the slot quadlet content exactly as slotDeploy writes it.
 func renderExpectedSlotContent(project, serviceName, slot string, svc ServiceConfig, activeSlots map[string]string, rt ContainerRuntime) string {
-	return rt.RenderContainerWithSlot(project, serviceName, slot, rewriteDepsForSlots(svc, activeSlots))
+	return withProjectMarker(project, rt.RenderContainerWithSlot(project, serviceName, slot, rewriteDepsForSlots(svc, activeSlots)))
 }
 
 // detectActiveSlot checks which slot is currently active for a service.
 // Returns the slot suffix (hash like "a1b2c3d4")
 // or "" if no slot file exists (first deploy or standard name).
-func detectActiveSlot(ctx context.Context, exec Executor, project, service, qdDir, unitExt string) string {
+//
+// An interrupted deploy can leave two slot files behind. Picking the first one
+// in directory order would be a coin flip on which container is actually
+// serving traffic — and the loser gets stopped and reaped as "stale". When more
+// than one candidate exists, the slot whose unit is active wins; sctl may be
+// empty to skip that probe.
+func detectActiveSlot(ctx context.Context, exec Executor, project, service, qdDir, unitExt, sctl string) string {
 	prefix := fmt.Sprintf("%s-%s-", project, service)
 	out, err := exec.Run(ctx, fmt.Sprintf("ls -1 %s 2>/dev/null || true", qdDir))
 	if err != nil {
 		return ""
 	}
+	var candidates []string
 	for _, name := range strings.Split(strings.TrimSpace(out), "\n") {
 		name = strings.TrimSpace(name)
 		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, unitExt) {
@@ -251,9 +255,22 @@ func detectActiveSlot(ctx context.Context, exec Executor, project, service, qdDi
 		if !isValidSlotHash(suffix) {
 			continue
 		}
-		return suffix
+		candidates = append(candidates, suffix)
 	}
-	return ""
+	if len(candidates) == 0 {
+		return ""
+	}
+	if len(candidates) == 1 || sctl == "" {
+		return candidates[0]
+	}
+	for _, slot := range candidates {
+		unit := fmt.Sprintf("%s-%s-%s.service", project, service, slot)
+		state, err := exec.Run(ctx, fmt.Sprintf(sctl+" is-active %s 2>/dev/null || true", shellQuote(unit)))
+		if err == nil && strings.TrimSpace(state) == "active" {
+			return slot
+		}
+	}
+	return candidates[0]
 }
 
 // detectActiveSlotFromListing parses an ls listing to find a slot file.

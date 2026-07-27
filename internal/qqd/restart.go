@@ -35,6 +35,21 @@ func (a *App) rollingRestartWithDrain(ctx context.Context, cfg ProjectConfig, ef
 	n := effectiveReplicas(svc)
 	fmt.Fprintf(a.Stdout, "  rolling restart with drain %s %s\n", bold(serviceName), dim(fmt.Sprintf("(%s, %d replicas)", imageTag(svc.Image), n)))
 
+	// A replica is pulled out of the proxy's route set before it is restarted.
+	// If the restart or the readiness wait fails we must put the full set back,
+	// otherwise the excluded replica stays out of the load balancer — silently
+	// reducing capacity — until some later deploy rewrites the routes.
+	restoreRoutes := func() {
+		restoreCtx := ctx
+		if ctx.Err() != nil {
+			restoreCtx = context.Background()
+		}
+		fullConf := a.proxy().GenerateDynamicConfig(project, allServices, eff.Expose, DynamicConfigOpts{})
+		if err := atomicWriteRemote(restoreCtx, exec, dynamicPath, fullConf); err != nil {
+			fmt.Fprintf(a.Stdout, "  %s could not restore proxy routes: %s\n", yellow("warning"), err)
+		}
+	}
+
 	for i := 1; i <= n; i++ {
 		unit := fmt.Sprintf("%s-%s-%d.service", project, serviceName, i)
 		cname := fmt.Sprintf("%s-%s-%d", project, serviceName, i)
@@ -60,6 +75,7 @@ func (a *App) rollingRestartWithDrain(ctx context.Context, cfg ProjectConfig, ef
 			}
 			sp.stop()
 			if ctx.Err() != nil {
+				restoreRoutes()
 				return ctx.Err()
 			}
 		}
@@ -68,12 +84,14 @@ func (a *App) rollingRestartWithDrain(ctx context.Context, cfg ProjectConfig, ef
 		sp := startSpinner(a.Stdout, fmt.Sprintf("  restarting replica %d", i))
 		if _, err := exec.Run(ctx, fmt.Sprintf(a.sctl()+" restart %s", shellQuote(unit))); err != nil {
 			sp.stop()
+			restoreRoutes()
 			return err
 		}
 
 		// 4. Wait for ready
 		if err := a.waitForReady(ctx, exec, cname, svc); err != nil {
 			sp.stop()
+			restoreRoutes()
 			return fmt.Errorf("replica %d not ready after restart: %w", i, err)
 		}
 		sp.stop()

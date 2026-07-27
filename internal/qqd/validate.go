@@ -52,6 +52,29 @@ func ValidateConfig(cfg ProjectConfig) []string {
 			}
 		}
 
+		// Host-port collisions. Only one PublishPort is emitted per host port, so
+		// a dashboard or TLS listener that reuses an entry's port silently wins
+		// and the other listener is never published.
+		hostPortOwner := map[int]string{}
+		if t.Expose.Dashboard > 0 {
+			hostPortOwner[t.Expose.Dashboard] = "dashboard"
+		}
+		for _, e := range t.Expose.Entries {
+			if owner, taken := hostPortOwner[e.HostPort]; taken {
+				msgs = append(msgs, fmt.Sprintf("error: target %q host port %d is used by both %s and this expose entry; each host port can only be published once", tName, e.HostPort, owner))
+			} else {
+				hostPortOwner[e.HostPort] = fmt.Sprintf("expose port %d", e.HostPort)
+			}
+			if e.TLS == nil || e.TLS.Port <= 0 {
+				continue
+			}
+			if owner, taken := hostPortOwner[e.TLS.Port]; taken {
+				msgs = append(msgs, fmt.Sprintf("error: target %q host port %d is used by both %s and the tls listener of expose port %d; each host port can only be published once", tName, e.TLS.Port, owner, e.HostPort))
+			} else {
+				hostPortOwner[e.TLS.Port] = fmt.Sprintf("tls listener of expose port %d", e.HostPort)
+			}
+		}
+
 		// TLS completeness (already caught at parse time, but validate catches
 		// cases where TLS port is set but certs_dir/server_name are missing).
 		for _, e := range t.Expose.Entries {

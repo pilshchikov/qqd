@@ -75,6 +75,7 @@ type SSHExecutor struct {
 	client *ssh.Client
 	user   string
 	host   string
+	closed bool
 }
 
 // newSSHExecutor dials an SSH connection and returns an executor.
@@ -265,12 +266,15 @@ func (e *SSHExecutor) CopyTo(ctx context.Context, localPath, remotePath string) 
 	}
 }
 
-// Close closes the underlying SSH connection.
+// Close closes the underlying SSH connection. Idempotent, so callers that
+// close an executor as soon as they are done with a target can still keep a
+// `defer Close()` as a safety net for early returns.
 func (e *SSHExecutor) Close() error {
-	if e.client != nil {
-		return e.client.Close()
+	if e.client == nil || e.closed {
+		return nil
 	}
-	return nil
+	e.closed = true
+	return e.client.Close()
 }
 
 // ID returns the SSH endpoint identifier.

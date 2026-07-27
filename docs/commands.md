@@ -73,7 +73,7 @@ SSH to target
   |     has dockerfile → build → mark changed
   |     no dockerfile  → pull  → mark changed
   |-- write unit files, daemon-reload
-  |-- remove stale unit files (full deploy: all removed services)
+  |-- remove stale unit files this project owns (full deploy: all removed services)
   |-- detect config changes (unit files + proxy container)
   |-- systemctl start <all units>
   |-- systemctl restart <changed units only>

@@ -257,37 +257,58 @@ func (m *mockExecutor) Run(_ context.Context, cmd string) (string, error) {
 		return "/home/testuser", nil
 	}
 	// Handle file writes (heredoc), including atomic writes (heredoc + mv)
-	// Supports both "cat > path <<'QD_EOF'" and "sudo sh -c 'cat > path' <<'QD_EOF'"
-	if strings.Contains(cmd, "<<'QD_EOF'") {
-		marker := " <<'QD_EOF'"
-		markerIdx := strings.Index(cmd, marker)
-		var path string
-		if strings.HasPrefix(cmd, "cat > ") {
-			path = cmd[len("cat > "):markerIdx]
-		} else if strings.Contains(cmd, "sh -c 'cat > ") {
-			start := strings.Index(cmd, "sh -c 'cat > ") + len("sh -c 'cat > ")
-			end := strings.Index(cmd[start:], "'")
-			if end > 0 {
-				path = cmd[start : start+end]
+	// Supports "cat > path <<'DELIM'", "cat > tmp <<'DELIM' && mv tmp path"
+	// and "sudo sh -c 'cat > path' <<'DELIM'" for any qqd heredoc delimiter.
+	if hdrEnd := strings.Index(cmd, "\n"); hdrEnd > 0 && strings.Contains(cmd[:hdrEnd], " <<'") {
+		header := cmd[:hdrEnd]
+		dStart := strings.Index(header, " <<'") + len(" <<'")
+		dEnd := strings.Index(header[dStart:], "'")
+		if dEnd > 0 {
+			delim := header[dStart : dStart+dEnd]
+			var path string
+			switch {
+			case strings.HasPrefix(header, "cat > "):
+				rest := header[len("cat > "):]
+				path = rest[:strings.Index(rest, " <<'")]
+			case strings.Contains(header, "sh -c 'cat > "):
+				rest := header[strings.Index(header, "sh -c 'cat > ")+len("sh -c 'cat > "):]
+				if end := strings.Index(rest, "'"); end > 0 {
+					path = rest[:end]
+				}
+			}
+			if path != "" {
+				body := cmd[hdrEnd+1:]
+				body = strings.TrimSuffix(body, delim)
+				m.files[path] = body
+				// Atomic write: "... && mv <tmp> <dst>" on the command line.
+				if mvIdx := strings.Index(header, "&& mv "); mvIdx >= 0 {
+					mvParts := strings.Fields(header[mvIdx+len("&& "):])
+					if len(mvParts) == 3 && mvParts[0] == "mv" {
+						m.files[mvParts[2]] = m.files[mvParts[1]]
+						delete(m.files, mvParts[1])
+					}
+				}
+				return "", nil
 			}
 		}
-		if path != "" {
-			contentStart := markerIdx + len(marker) + 1 // +1 for newline
-			contentEnd := strings.LastIndex(cmd, "QD_EOF")
-			if contentStart < contentEnd {
-				m.files[path] = cmd[contentStart:contentEnd]
+	}
+	// Ownership markers: grep -H '^# qqd-project=' <dir>/*
+	if strings.HasPrefix(cmd, "grep -H '^# qqd-project=' ") {
+		dir := strings.TrimSuffix(cmd[len("grep -H '^# qqd-project=' "):], "/* 2>/dev/null || true")
+		var lines []string
+		for path, content := range m.files {
+			if !strings.HasPrefix(path, dir+"/") || strings.Contains(path[len(dir)+1:], "/") {
+				continue
 			}
-			// Handle atomic write: if there's a "mv src dst" after the heredoc, rename
-			afterHeredoc := cmd[contentEnd+len("QD_EOF"):]
-			if mvIdx := strings.Index(afterHeredoc, "\nmv "); mvIdx >= 0 {
-				mvParts := strings.Fields(strings.TrimSpace(afterHeredoc[mvIdx+1:]))
-				if len(mvParts) == 3 && mvParts[0] == "mv" {
-					m.files[mvParts[2]] = m.files[mvParts[1]]
-					delete(m.files, mvParts[1])
+			for _, line := range strings.Split(content, "\n") {
+				if strings.HasPrefix(line, "# qqd-project=") {
+					lines = append(lines, path+":"+line)
+					break
 				}
 			}
 		}
-		return "", nil
+		sort.Strings(lines)
+		return strings.Join(lines, "\n"), nil
 	}
 	// Handle file reads
 	if strings.HasPrefix(cmd, "cat ") && strings.Contains(cmd, " 2>/dev/null || true") {
@@ -2058,7 +2079,7 @@ func TestDetectActiveSlotHash(t *testing.T) {
 	hash := slotHash("ghcr.io/acme/server:1.0")
 	exec.files[fmt.Sprintf("~/.config/containers/systemd/proj-server-%s.container", hash)] = "[Container]\n"
 	ctx := context.Background()
-	slot := detectActiveSlot(ctx, exec, "proj", "server", "~/.config/containers/systemd", ".container")
+	slot := detectActiveSlot(ctx, exec, "proj", "server", "~/.config/containers/systemd", ".container", "systemctl --user")
 	if slot != hash {
 		t.Fatalf("expected slot %q, got %q", hash, slot)
 	}
@@ -2069,7 +2090,7 @@ func TestDetectActiveSlotSkipsReplicas(t *testing.T) {
 	exec.files["~/.config/containers/systemd/proj-server-1.container"] = "[Container]\n"
 	exec.files["~/.config/containers/systemd/proj-server-2.container"] = "[Container]\n"
 	ctx := context.Background()
-	slot := detectActiveSlot(ctx, exec, "proj", "server", "~/.config/containers/systemd", ".container")
+	slot := detectActiveSlot(ctx, exec, "proj", "server", "~/.config/containers/systemd", ".container", "systemctl --user")
 	if slot != "" {
 		t.Fatalf("expected empty slot (replicas only), got %q", slot)
 	}
@@ -2152,12 +2173,12 @@ func TestDetectActiveSlotPrefixCollision(t *testing.T) {
 	ctx := context.Background()
 
 	// Detecting slot for "web" should return "" (no slot for web)
-	slot := detectActiveSlot(ctx, exec, "proj", "web", "~/.config/containers/systemd", ".container")
+	slot := detectActiveSlot(ctx, exec, "proj", "web", "~/.config/containers/systemd", ".container", "systemctl --user")
 	if slot != "" {
 		t.Fatalf("detectActiveSlot for 'web' should return empty when only 'web-api' has slot, got %q", slot)
 	}
 
-	slot = detectActiveSlot(ctx, exec, "proj", "web-api", "~/.config/containers/systemd", ".container")
+	slot = detectActiveSlot(ctx, exec, "proj", "web-api", "~/.config/containers/systemd", ".container", "systemctl --user")
 	if slot != apiHash {
 		t.Fatalf("detectActiveSlot for 'web-api' = %q, want %q", slot, apiHash)
 	}
@@ -2210,9 +2231,10 @@ func TestClean(t *testing.T) {
 	}
 	cmds := strings.Join(customExec.commands, "\n")
 
-	// Should list stopped project containers
-	if !strings.Contains(cmds, "podman ps -a --filter name='^myapp-' --filter status=exited --filter status=created --format '{{.Names}}'") {
-		t.Fatalf("should list stopped project containers:\n%s", cmds)
+	// Should list stopped containers (ownership is decided per name, not by a
+	// "<project>-" filter that also matches another project's containers)
+	if !strings.Contains(cmds, "podman ps -a --filter status=exited --filter status=created --format '{{.Names}}'") {
+		t.Fatalf("should list stopped containers:\n%s", cmds)
 	}
 	// Should list project images by repository reference
 	if !strings.Contains(cmds, "podman images --filter reference='myapp-server' --format '{{.Repository}}:{{.Tag}}'") {
@@ -2329,7 +2351,9 @@ func (m *cleanMockExecutor) Run(_ context.Context, cmd string) (string, error) {
 	if strings.Contains(cmd, "podman images") && strings.Contains(cmd, "--filter reference=") {
 		return m.imagesOutput + "\n", nil
 	}
-	return "", nil
+	// Everything else (release listing/reads, rm, rmi, prune) behaves like the
+	// shared mock so tests can seed release records via files.
+	return m.mockExecutor.Run(context.Background(), cmd)
 }
 
 func (m *cleanMockExecutor) RunStream(_ context.Context, cmd string, _ io.Writer) error {

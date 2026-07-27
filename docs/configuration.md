@@ -95,7 +95,7 @@ Defined inside: targets { <name> { ... } }
 | ssh_key | string | no | — | Path to SSH private key. ~ expands to home dir |
 | ssh_port | integer | no | 22 | SSH port |
 | insecure_host_key | boolean | no | false | Skip SSH known_hosts verification |
-| repo_dir | string | conditional | — | Absolute path on target for repo clone/sync. Required whenever `sync` is set or any service builds from source. Optional for pure image-pull deploys. |
+| repo_dir | string | conditional | — | Absolute path on target for repo clone/sync. Required whenever `sync` is set or any service builds from source. Optional for pure image-pull deploys. With `sync = "upload"` it must be a dedicated directory at least two path segments deep (e.g. `/srv/app/src`): upload sync rsyncs it with `--delete` and removes it after the build. |
 | services | array of strings | no | all | Deploy only these services on this target |
 | dirs | array of strings | no | [] | Directories to create before deploy (mkdir -p) |
 | env | map string→string | no | {} | Variables for ${VAR} expansion |

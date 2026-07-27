@@ -53,6 +53,29 @@ func buildContextPaths(ctx context.Context, exec Executor, services map[string]S
 	return paths
 }
 
+// checkUploadRepoDir rejects a repo_dir that upload-mode sync would be unsafe
+// to own. Upload mode rsyncs with --delete into repo_dir and removes the tree
+// afterwards, so pointing it at a home directory or a top-level path destroys
+// unrelated data.
+func checkUploadRepoDir(repoDir string) error {
+	dir := strings.TrimSpace(repoDir)
+	dir = strings.TrimSuffix(dir, "/")
+	switch dir {
+	case "", ".", "..", "/", "~", "$HOME", "${HOME}":
+		return fmt.Errorf("repo_dir %q is unsafe for sync = \"upload\": it is rsynced with --delete and removed after the build; use a dedicated directory", repoDir)
+	}
+	segments := 0
+	for _, s := range strings.Split(strings.TrimPrefix(dir, "/"), "/") {
+		if s != "" && s != "." {
+			segments++
+		}
+	}
+	if segments < 2 {
+		return fmt.Errorf("repo_dir %q is too shallow for sync = \"upload\": it is rsynced with --delete and removed after the build; use a dedicated subdirectory such as %q", repoDir, dir+"/src")
+	}
+	return nil
+}
+
 // Returns a list of remote paths that were uploaded (for cleanup after build).
 // Returns nil when no upload occurred (git sync or upload skipped).
 func (a *App) ensureRepoAndDirs(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, targetExec Executor, rebuild bool) ([]string, error) {
@@ -91,6 +114,9 @@ func (a *App) ensureRepoAndDirs(ctx context.Context, cfg ProjectConfig, eff Effe
 			return nil, err
 		}
 	case "upload":
+		if err := checkUploadRepoDir(eff.Target.RepoDir); err != nil {
+			return nil, fmt.Errorf("target %s: %w", eff.Target.Name, err)
+		}
 		if a.NoBuild || !needsLocalBuild(ctx, targetExec, eff.Services, rebuild) {
 			fmt.Fprintf(a.Stdout, "  %s upload %s\n", green("skipping"), dim("(all images exist)"))
 		} else {
@@ -229,6 +255,12 @@ func (a *App) syncUpload(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 // subdirectories depending on how the upload was scoped.
 func (a *App) cleanupUploadedSource(ctx context.Context, exec Executor, paths []string) {
 	for _, p := range paths {
+		// Second line of defence for the recursive delete: never run it against
+		// a path that isn't a dedicated directory.
+		if err := checkUploadRepoDir(p); err != nil {
+			fmt.Fprintf(a.Stdout, "  %s skipping cleanup of %s: %s\n", yellow("warning"), p, err)
+			continue
+		}
 		sp := startSpinner(a.Stdout, fmt.Sprintf("cleaning up uploaded source %s", p))
 		exec.Run(ctx, fmt.Sprintf("rm -rf %s", shellQuote(p)))
 		sp.stop()

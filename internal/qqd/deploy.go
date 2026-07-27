@@ -190,6 +190,7 @@ func (a *App) Init(ctx context.Context, cfg ProjectConfig, targetName string, cl
 			return fmt.Errorf("target %s: %w", name, err)
 		}
 		fmt.Fprintf(a.Stdout, "%s target %s %s\n", boldGreen("initialized"), bold(name), dim("("+eff.Target.Host+")"))
+		exec.Close()
 	}
 	return nil
 }
@@ -268,8 +269,9 @@ func (a *App) Deploy(ctx context.Context, cfg ProjectConfig, targetName string, 
 				a.cleanupUploadedSource(ctx, exec, uploaded)
 			}
 			fmt.Fprintf(a.Stdout, "%s installing quadlet files and starting services on %s\n", boldCyan("[deploy]"), dim(eff.Target.Host))
-			if err := a.installAndStart(ctx, cfg, eff, exec, false, changed, len(cliServices) == 0); err != nil {
-				a.attemptAutoRollback(ctx, cfg, eff, exec)
+			fullDeploy := len(cliServices) == 0
+			if err := a.installAndStart(ctx, cfg, eff, exec, false, changed, fullDeploy); err != nil {
+				a.attemptAutoRollback(ctx, cfg, eff, exec, fullDeploy)
 				return err
 			}
 			// Save release before post_deploy hook so a successful deploy is always recorded
@@ -294,6 +296,7 @@ func (a *App) Deploy(ctx context.Context, cfg ProjectConfig, targetName string, 
 		} else {
 			fmt.Fprintf(a.Stdout, "target %s %s %s\n", bold(name), dim("("+eff.Target.Host+")"), green("is up to date"))
 		}
+		exec.Close()
 	}
 	return nil
 }
@@ -338,6 +341,7 @@ func (a *App) Build(ctx context.Context, cfg ProjectConfig, targetName string, c
 			return fmt.Errorf("target %s: %w", name, err)
 		}
 		fmt.Fprintf(a.Stdout, "%s target %s %s; changed images: %s\n", boldGreen("built"), bold(name), dim("("+eff.Target.Host+")"), strings.Join(changed, ", "))
+		exec.Close()
 	}
 	return nil
 }
@@ -373,6 +377,7 @@ func (a *App) DeployConfigOnly(ctx context.Context, cfg ProjectConfig, targetNam
 		}
 
 		fmt.Fprintf(a.Stdout, "%s config updated on %s\n", boldGreen("deployed"), bold(name))
+		exec.Close()
 	}
 	return nil
 }
@@ -442,7 +447,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	activeSlots := map[string]string{} // service → active slot hash
 	if len(slottedSvcs) > 0 {
 		for name := range slottedSvcs {
-			slot := detectActiveSlot(ctx, targetExec, cfg.Name, name, qdDir, a.rt().UnitExtension())
+			slot := detectActiveSlot(ctx, targetExec, cfg.Name, name, qdDir, a.rt().UnitExtension(), a.sctl())
 			if slot != "" {
 				activeSlots[name] = slot
 			}
@@ -507,8 +512,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 		// write when the generator returns empty so we don't litter the target
 		// with an empty file or trigger spurious heredoc edge cases.
 		if proxyStatic != "" && proxyStatic != oldProxyStatic {
-			heredoc := fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", staticPath, proxyStatic)
-			if _, err := targetExec.Run(ctx, heredoc); err != nil {
+			if _, err := targetExec.Run(ctx, remoteWriteCmd(staticPath, proxyStatic)); err != nil {
 				return err
 			}
 		}
@@ -538,11 +542,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 			continue // unchanged
 		}
 		path := fmt.Sprintf("%s/%s", qdDir, f.Name)
-		heredoc := fmt.Sprintf("%ssh -c 'cat > %s' <<'QD_EOF'\n%sQD_EOF", sudo, path, f.Content)
-		if sudo == "" {
-			heredoc = fmt.Sprintf("cat > %s <<'QD_EOF'\n%sQD_EOF", path, f.Content)
-		}
-		if _, err := targetExec.Run(ctx, heredoc); err != nil {
+		if _, err := targetExec.Run(ctx, remoteWriteCmdSudo(sudo, path, f.Content)); err != nil {
 			return err
 		}
 		written++
@@ -554,7 +554,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	// Remove stale quadlet files from previous deployments
 	// (e.g., when replica count changes or service switches between replicated/non-replicated)
 	if !firstInit {
-		a.removeStaleQuadlets(ctx, cfg.Name, qdDir, files, eff.Services, targetExec, fullDeploy, slottedSvcs)
+		a.removeStaleQuadlets(ctx, cfg.Name, qdDir, files, eff.Services, allServices, targetExec, fullDeploy, slottedSvcs)
 	}
 
 	// Detect quadlet/static config changes.
@@ -566,7 +566,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	if !firstInit {
 		for _, f := range files {
 			if old := oldQuadlet[f.Name]; old != "" && old != f.Content {
-				if svc := serviceNameFromQuadlet(cfg.Name, f.Name); svc != "" {
+				if svc, ok := serviceForQuadlet(cfg.Name, f.Name, a.rt().UnitExtension(), allServices); ok {
 					configChanged = append(configChanged, svc)
 				}
 			}
@@ -649,7 +649,7 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 	for svcName, slot := range activeSlots {
 		if slotDeployed[svcName] {
 			// slot just deployed — verify the new slot unit
-			newSlot := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension())
+			newSlot := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension(), a.sctl())
 			if newSlot == "" {
 				continue
 			}
@@ -702,7 +702,12 @@ func (a *App) annotateVolumeOwnership(ctx context.Context, exec Executor, servic
 //     spec so the last-known-good shape is restored. Without this we leave
 //     the operator looking at a half-broken target with the original error
 //     and no recourse beyond manual cleanup.
-func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor) {
+//
+// fullDeploy must be the flag the failing deploy ran with: eff.Services only
+// holds the services named on the CLI, so claiming a full deploy during the
+// rollback of a partial one would let the stale-unit pass treat every service
+// that wasn't part of `qqd deploy <svc>` as removed from the config.
+func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, fullDeploy bool) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -741,7 +746,7 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 		// every service as needing restart, not just the ones whose images
 		// moved.
 		all := sortedKeys(rollbackServices)
-		if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, all, true); err != nil {
+		if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, all, fullDeploy); err != nil {
 			fmt.Fprintf(a.Stdout, "  %s restore previous shape failed: %s\n", red("error"), err)
 			return
 		}
@@ -769,7 +774,7 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 
 	rollbackEff := eff
 	rollbackEff.Services = rollbackServices
-	if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, changed, true); err != nil {
+	if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, changed, fullDeploy); err != nil {
 		fmt.Fprintf(a.Stdout, "  %s auto-rollback failed: %s\n", red("error"), err)
 		return
 	}

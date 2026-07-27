@@ -50,6 +50,11 @@ func renderQuadletFiles(project string, deployServices, allServices map[string]S
 		}
 		files = append(files, proxy.RenderContainerQuadlet(project, allServices, expose, skip))
 	}
+	// Stamp ownership so cleanup passes can tell this project's units apart from
+	// those of a project whose name shares the same prefix.
+	for i := range files {
+		files[i].Content = withProjectMarker(project, files[i].Content)
+	}
 	return files
 }
 
@@ -204,10 +209,14 @@ func writePodmanArgs(b *strings.Builder, cfg ServiceConfig) {
 
 // formatExecArgs formats command arguments for the Quadlet Exec= directive.
 // Systemd treats a leading '-' as "ignore errors" prefix, so arguments that
-// start with '-' must be quoted to prevent misinterpretation.
+// start with '-' must be quoted to prevent misinterpretation. '%' starts a
+// systemd specifier and is escaped as '%%' so an argument like "%H" or a printf
+// format string reaches the container verbatim instead of being expanded (or
+// rejected as an unknown specifier).
 func formatExecArgs(args []string) string {
 	quoted := make([]string, len(args))
 	for i, a := range args {
+		a = strings.ReplaceAll(a, "%", "%%")
 		if strings.HasPrefix(a, "-") || strings.ContainsAny(a, " \t\"'") {
 			quoted[i] = fmt.Sprintf("%q", a)
 		} else {

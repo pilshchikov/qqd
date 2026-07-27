@@ -422,7 +422,7 @@ func (a *App) Logs(ctx context.Context, cfg ProjectConfig, targetName string, se
 	var containers []string
 	for _, svcName := range sortedKeys(eff.Services) {
 		svc := eff.Services[svcName]
-		containers = append(containers, resolveContainerNames(ctx, exec, cfg.Name, svcName, svc, qdDir, a.rt().UnitExtension())...)
+		containers = append(containers, resolveContainerNames(ctx, exec, cfg.Name, svcName, svc, qdDir, a.rt().UnitExtension(), a.sctl())...)
 	}
 	if len(containers) == 0 {
 		return errors.New("no containers to show logs for")
@@ -490,7 +490,7 @@ func (pw *prefixWriter) Write(p []byte) (int, error) {
 
 // resolveContainerNames returns all runtime container names for a service,
 // including all replicas for replicated services.
-func resolveContainerNames(ctx context.Context, exec Executor, project, service string, svc ServiceConfig, qdDir, unitExt string) []string {
+func resolveContainerNames(ctx context.Context, exec Executor, project, service string, svc ServiceConfig, qdDir, unitExt, sctl string) []string {
 	if isReplicated(svc) {
 		names := make([]string, 0, effectiveReplicas(svc))
 		for i := 1; i <= effectiveReplicas(svc); i++ {
@@ -498,7 +498,7 @@ func resolveContainerNames(ctx context.Context, exec Executor, project, service 
 		}
 		return names
 	}
-	slot := detectActiveSlot(ctx, exec, project, service, qdDir, unitExt)
+	slot := detectActiveSlot(ctx, exec, project, service, qdDir, unitExt, sctl)
 	if slot != "" {
 		return []string{fmt.Sprintf("%s-%s-%s", project, service, slot)}
 	}
@@ -698,12 +698,20 @@ func (a *App) Destroy(ctx context.Context, cfg ProjectConfig, targetName string)
 			}
 			qdDir := a.rt().UnitDir()
 			sp := startSpinner(a.Stdout, "removing quadlet files")
-			ext := a.rt().UnitExtension()
-			netFile := a.rt().NetworkFileName(cfg.Name)
-			sudo := a.sudoPrefix()
-			if _, err := exec.Run(ctx, fmt.Sprintf("%srm -f %s/%s %s/%s-*%s", sudo, qdDir, netFile, qdDir, cfg.Name, ext)); err != nil {
-				sp.stop()
-				return err
+			// Resolve the files that belong to this project instead of globbing
+			// "<project>-*": the glob also matches the units of a project whose
+			// name starts with this one ("app" vs "app-report").
+			files := a.projectQuadletFiles(ctx, cfg.Name, qdDir, eff.Services, exec)
+			if len(files) > 0 {
+				paths := make([]string, 0, len(files))
+				for _, f := range files {
+					paths = append(paths, qdDir+"/"+shellQuote(f))
+				}
+				sudo := a.sudoPrefix()
+				if _, err := exec.Run(ctx, fmt.Sprintf("%srm -f %s", sudo, strings.Join(paths, " "))); err != nil {
+					sp.stop()
+					return err
+				}
 			}
 			sp.stop()
 			sp = startSpinner(a.Stdout, "cleaning up proxy config")
@@ -721,6 +729,7 @@ func (a *App) Destroy(ctx context.Context, cfg ProjectConfig, targetName string)
 			return fmt.Errorf("target %s: %w", name, err)
 		}
 		fmt.Fprintf(a.Stdout, "%s target %s\n", boldGreen("destroyed"), bold(name))
+		exec.Close()
 	}
 	return nil
 }
@@ -740,15 +749,25 @@ func (a *App) Clean(ctx context.Context, cfg ProjectConfig, targetName string) e
 		}
 		defer exec.Close()
 
-		// Remove stopped project containers
+		// Remove stopped project containers. The container names are matched
+		// against the configured service set rather than a "<project>-" name
+		// filter, which would also match another project's containers when one
+		// project name is a prefix of the other ("app" vs "app-report").
 		sp := startSpinner(a.Stdout, fmt.Sprintf("removing containers on %s", name))
-		out, err := exec.Run(ctx, fmt.Sprintf(a.crt()+" ps -a --filter name='^%s-' --filter status=exited --filter status=created --format '{{.Names}}'", cfg.Name))
+		out, err := exec.Run(ctx, a.crt()+" ps -a --filter status=exited --filter status=created --format '{{.Names}}'")
 		sp.stop()
 		if err == nil && strings.TrimSpace(out) != "" {
-			names := strings.Fields(strings.TrimSpace(out))
-			sp = startSpinner(a.Stdout, fmt.Sprintf("removing %d containers on %s", len(names), name))
-			exec.Run(ctx, fmt.Sprintf(a.crt()+" rm -f %s", joinQuoted(names)))
-			sp.stop()
+			var names []string
+			for _, cname := range strings.Fields(strings.TrimSpace(out)) {
+				if projectOwnsContainer(cfg.Name, cname, eff.Services) {
+					names = append(names, cname)
+				}
+			}
+			if len(names) > 0 {
+				sp = startSpinner(a.Stdout, fmt.Sprintf("removing %d containers on %s", len(names), name))
+				exec.Run(ctx, fmt.Sprintf(a.crt()+" rm -f %s", joinQuoted(names)))
+				sp.stop()
+			}
 		}
 
 		// Remove project images (old tags for each service's image repository)
@@ -762,6 +781,17 @@ func (a *App) Clean(ctx context.Context, cfg ProjectConfig, targetName string) e
 				repos[repo] = true
 			} else {
 				repos[svc.Image] = true
+			}
+		}
+		// Keep every image a stored release points at: those are what `qqd
+		// rollback` and the post-failure auto-rollback restore. Deleting them
+		// leaves rollback dependent on the image still being pullable, which it
+		// isn't for locally built images.
+		if releases, err := listReleases(ctx, exec, cfg.Name); err == nil {
+			for _, rel := range releases {
+				for _, image := range rel.Services {
+					activeImages[image] = true
+				}
 			}
 		}
 		if len(repos) > 0 {
@@ -795,6 +825,7 @@ func (a *App) Clean(ctx context.Context, cfg ProjectConfig, targetName string) e
 		sp.stop()
 
 		fmt.Fprintf(a.Stdout, "%s target %s\n", boldGreen("cleaned"), bold(name))
+		exec.Close()
 	}
 	return nil
 }
@@ -828,7 +859,7 @@ func (a *App) systemdCommand(ctx context.Context, cfg ProjectConfig, targetName 
 		}
 		for _, svcName := range sortedKeys(eff.Services) {
 			svc := eff.Services[svcName]
-			unit := resolveServiceUnit(ctx, exec, cfg.Name, svcName, svc, qdDir, a.rt().UnitExtension())
+			unit := resolveServiceUnit(ctx, exec, cfg.Name, svcName, svc, qdDir, a.rt().UnitExtension(), a.sctl())
 			units = append(units, unit)
 		}
 		if hasExposedServices(eff.Expose) {
@@ -844,6 +875,7 @@ func (a *App) systemdCommand(ctx context.Context, cfg ProjectConfig, targetName 
 		}
 		sp.stop()
 		fmt.Fprintf(a.Stdout, "%s target %s\n", boldGreen(action+"ped"), bold(name))
+		exec.Close()
 	}
 	return nil
 }
@@ -851,11 +883,11 @@ func (a *App) systemdCommand(ctx context.Context, cfg ProjectConfig, targetName 
 // resolveServiceUnit returns the correct systemd unit name for a service,
 // checking for slot-based deployments. For replicated services, returns the standard
 // unit (replicas are handled individually where needed).
-func resolveServiceUnit(ctx context.Context, exec Executor, project, service string, svc ServiceConfig, qdDir, unitExt string) string {
+func resolveServiceUnit(ctx context.Context, exec Executor, project, service string, svc ServiceConfig, qdDir, unitExt, sctl string) string {
 	if isReplicated(svc) {
 		return fmt.Sprintf("%s-%s-1.service", project, service)
 	}
-	slot := detectActiveSlot(ctx, exec, project, service, qdDir, unitExt)
+	slot := detectActiveSlot(ctx, exec, project, service, qdDir, unitExt, sctl)
 	if slot != "" {
 		return fmt.Sprintf("%s-%s-%s.service", project, service, slot)
 	}
@@ -878,7 +910,7 @@ func (a *App) diagnoseFailedUnits(ctx context.Context, cfg ProjectConfig, eff Ef
 		} else {
 			unit := containerUnit(cfg.Name, svcName)
 			cname := containerName(cfg.Name, svcName)
-			if slot := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension()); slot != "" {
+			if slot := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension(), a.sctl()); slot != "" {
 				unit = fmt.Sprintf("%s-%s-%s.service", cfg.Name, svcName, slot)
 				cname = fmt.Sprintf("%s-%s-%s", cfg.Name, svcName, slot)
 			}
