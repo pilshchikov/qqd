@@ -153,6 +153,15 @@ TLS termination:
           certs_dir: /certs
           server_name: example.com
 
+Several hostnames on one certificate (first entry names the cert directory):
+    expose:
+      80:
+        "/": "server:8080"
+        tls:
+          port: 443
+          certs_dir: /etc/letsencrypt
+          server_name: ["primary.example.com", "alias.example.com"]
+
 Dashboard:
     expose:
       dashboard: 1111
@@ -163,7 +172,7 @@ Dashboard:
 |-------|------|----------|-------------|
 | port | integer | no | HTTPS listen port (default: 443) |
 | certs_dir | string | yes | Host path to certificate directory |
-| server_name | string | yes | Domain for SNI and cert lookup |
+| server_name | string or list | yes | Domain(s) for SNI and cert lookup. A list serves several hostnames from one certificate: the first entry is the cert directory name under `<certs_dir>/live/`, and every entry gets an HTTP→HTTPS redirect |
 
 ## Env Files
 

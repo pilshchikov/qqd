@@ -219,6 +219,19 @@ targets {
 .fi
 .RE
 .PP
+\fBseveral hostnames on one certificate\fR \(em pass a list; the first entry names
+the certificate directory under \fIcerts_dir\fR/live/ and every entry is redirected
+from HTTP to HTTPS:
+.RS
+.nf
+tls {
+  port = 443
+  certs_dir = "/etc/letsencrypt"
+  server_name = ["primary.example.com", "alias.example.com"]
+}
+.fi
+.RE
+.PP
 \fBTraefik dashboard\fR \(em expose Traefik's built-in dashboard on a host port:
 .RS
 .nf

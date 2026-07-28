@@ -27,7 +27,7 @@ The Caddy admin API is **not enabled** by `qqd`. Reload happens by `systemctl re
 |---|---|---|
 | HTTP routing by path | Yes | Same `expose:` syntax as Traefik. Longest-path-first priority. |
 | HTTP routing on multiple ports | Yes | One Caddy server block per host port. |
-| TLS termination | Yes | Provide `tls.certs_dir` + `tls.server_name` in the expose entry. Caddy reads the cert and key from `<certs_dir>/live/<server_name>/{fullchain,privkey}.pem`. |
+| TLS termination | Yes | Provide `tls.certs_dir` + `tls.server_name` in the expose entry. Caddy reads the cert and key from `<certs_dir>/live/<server_name>/{fullchain,privkey}.pem`. When `server_name` is a list, the first entry names the cert directory; Caddy's site blocks are port-based, so every hostname in the cert is served. |
 | Multiple replicas (load balance) | Yes | Caddy's built-in `reverse_proxy` round-robins between upstreams. |
 | Blue-green slot switching | Yes | `qqd` writes a new Caddyfile pointing at the new slot, then restarts the proxy. |
 | Rolling drain | Yes | `qqd` excludes the draining replica from the upstream list, restarts the proxy, then restarts the replica. |

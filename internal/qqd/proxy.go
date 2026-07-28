@@ -298,7 +298,7 @@ func generateTraefikDynamicOpts(project string, services map[string]ServiceConfi
 
 				// HTTP → HTTPS redirect router
 				redirectKey := sanitizeTraefikName(fmt.Sprintf("%s-redirect-%d", project, e.HostPort))
-				httpRouters = append(httpRouters, formatHTTPRedirectRouter(redirectKey, ep, e.TLS.ServerName))
+				httpRouters = append(httpRouters, formatHTTPRedirectRouter(redirectKey, ep, e.TLS.hostNames()))
 				httpServices = append(httpServices, formatRedirectService(redirectKey))
 			}
 		}
@@ -395,6 +395,33 @@ func generateTraefikDynamicOpts(project string, services map[string]ServiceConfi
 	}
 
 	return b.String()
+}
+
+// tlsCertFiles returns the host-side certificate chains referenced by an expose
+// config, deduplicated. Only fullchain.pem is listed: it is world-readable (so no
+// sudo is needed to read it) and always rewritten alongside privkey.pem, which
+// makes it a faithful stand-in for the whole certificate.
+func tlsCertFiles(expose ExposeConfig) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range expose.Entries {
+		if e.TLS == nil || e.TLS.CertsDir == "" || e.TLS.ServerName == "" {
+			continue
+		}
+		p := fmt.Sprintf("%s/live/%s/fullchain.pem", e.TLS.CertsDir, e.TLS.ServerName)
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// tlsFingerprintPath is where the last deployed certificate fingerprint is kept
+// on the target, next to the proxy's generated config.
+func tlsFingerprintPath(project string) string {
+	return fmt.Sprintf("~/.config/qqd/%s/tls-fingerprint", project)
 }
 
 // traefikTLSMountPath returns a deterministic in-container mount path for a certs_dir.
@@ -563,11 +590,16 @@ func formatHTTPTLSRouter(routerKey, entrypoint, path, serviceName string, priori
 }
 
 // formatHTTPRedirectRouter returns a YAML fragment for HTTP→HTTPS redirect.
-func formatHTTPRedirectRouter(routerKey, entrypoint, serverName string) string {
+// Every hostname the certificate covers gets redirected, not just the primary.
+func formatHTTPRedirectRouter(routerKey, entrypoint string, serverNames []string) string {
 	var b strings.Builder
+	clauses := make([]string, 0, len(serverNames))
+	for _, n := range serverNames {
+		clauses = append(clauses, fmt.Sprintf("HostRegexp(`%s`)", n))
+	}
 	b.WriteString(fmt.Sprintf("    %s:\n", routerKey))
 	b.WriteString(fmt.Sprintf("      entryPoints:\n        - %s\n", entrypoint))
-	b.WriteString(fmt.Sprintf("      rule: \"HostRegexp(`%s`)\"\n", serverName))
+	b.WriteString(fmt.Sprintf("      rule: \"%s\"\n", strings.Join(clauses, " || ")))
 	b.WriteString(fmt.Sprintf("      service: %s\n", routerKey))
 	b.WriteString("      middlewares:\n        - redirect-to-https\n")
 	b.WriteString("      priority: 1\n")

@@ -1173,3 +1173,81 @@ targets {
 		t.Fatalf("DB_HOST = %q, want explicit-value (explicit env should override file)", eff.Target.Env["DB_HOST"])
 	}
 }
+
+func TestParseTLSServerNameList(t *testing.T) {
+	td := t.TempDir()
+	cfgPath := filepath.Join(td, "app.conf")
+	cfgText := `
+name = "proj"
+services {
+  server { image = "server:1.0" }
+}
+targets {
+  main {
+    host = "local"
+    repo_dir = "/tmp/proj"
+    expose {
+      80 {
+        "/" = "server:8080"
+        tls {
+          port = 443
+          certs_dir = "/etc/letsencrypt"
+          server_name = ["primary.example.com", "alias.example.com"]
+        }
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadProjectConfig([]string{cfgPath}, td)
+	if err != nil {
+		t.Fatalf("loadProjectConfig failed: %v", err)
+	}
+	tls := cfg.Targets["main"].Expose.Entries[0].TLS
+	if tls == nil {
+		t.Fatal("TLS should be set")
+	}
+	if tls.ServerName != "primary.example.com" {
+		t.Fatalf("primary server name mismatch: %q", tls.ServerName)
+	}
+	if len(tls.ServerNames) != 2 || tls.ServerNames[1] != "alias.example.com" {
+		t.Fatalf("server name list mismatch: %#v", tls.ServerNames)
+	}
+}
+
+func TestParseTLSServerNameStringFillsList(t *testing.T) {
+	td := t.TempDir()
+	cfgPath := filepath.Join(td, "app.conf")
+	cfgText := `
+name = "proj"
+services {
+  server { image = "server:1.0" }
+}
+targets {
+  main {
+    host = "local"
+    repo_dir = "/tmp/proj"
+    expose {
+      80 {
+        "/" = "server:8080"
+        tls { certs_dir = "/certs", server_name = "example.com" }
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadProjectConfig([]string{cfgPath}, td)
+	if err != nil {
+		t.Fatalf("loadProjectConfig failed: %v", err)
+	}
+	tls := cfg.Targets["main"].Expose.Entries[0].TLS
+	if tls.ServerName != "example.com" || len(tls.ServerNames) != 1 {
+		t.Fatalf("string form should yield one name: %q %#v", tls.ServerName, tls.ServerNames)
+	}
+}

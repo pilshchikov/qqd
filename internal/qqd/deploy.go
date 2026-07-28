@@ -576,6 +576,21 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 		}
 	}
 
+	// Certificates are read from disk when the proxy starts, and neither Traefik's
+	// file watcher nor a dynamic-config rewrite re-reads them. A renewal or a
+	// re-issue that adds a hostname would otherwise keep serving the old chain
+	// until someone restarts the proxy by hand, so compare fingerprints and
+	// restart when the content on the target actually changed.
+	if hasExposedServices(effectiveExpose) {
+		changed, err := a.syncTLSFingerprint(ctx, targetExec, cfg.Name, effectiveExpose, firstInit)
+		if err != nil {
+			return err
+		}
+		if changed && !contains(configChanged, "__proxy__") {
+			configChanged = append(configChanged, "__proxy__")
+		}
+	}
+
 	sp := startSpinner(a.Stdout, "reloading systemd daemon")
 	if _, err := targetExec.Run(ctx, a.sctl()+" daemon-reload"); err != nil {
 		sp.stop()
@@ -782,6 +797,42 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 	fmt.Fprintf(a.Stdout, "%s auto-rolled back to %s\n", boldGreen("rolled back"), bold(rel.ID))
 }
 
+// syncTLSFingerprint hashes the certificate chains referenced by the expose
+// config on the target and compares them against the fingerprint recorded by the
+// previous deploy. It records the new fingerprint and reports whether the
+// certificates changed, meaning the proxy has to restart to load them.
+//
+// A missing or unreadable certificate is not treated as a change: the proxy is
+// left alone and the deploy carries on, since the cert may be provisioned
+// separately (certbot, a mounted secret) after the first deploy.
+func (a *App) syncTLSFingerprint(ctx context.Context, exec Executor, project string, expose ExposeConfig, firstInit bool) (bool, error) {
+	files := tlsCertFiles(expose)
+	if len(files) == 0 {
+		return false, nil
+	}
+	statePath := tlsFingerprintPath(project)
+	out, err := exec.Run(ctx, fmt.Sprintf("sha256sum %s 2>/dev/null || shasum -a 256 %s 2>/dev/null || true", joinQuoted(files), joinQuoted(files)))
+	if err != nil {
+		return false, nil
+	}
+	fingerprint := strings.TrimSpace(out)
+	if fingerprint == "" {
+		return false, nil
+	}
+	var recorded string
+	if !firstInit {
+		if prev, err := exec.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null || true", statePath)); err == nil {
+			recorded = strings.TrimSpace(prev)
+		}
+	}
+	if _, err := exec.Run(ctx, remoteWriteCmd(statePath, fingerprint+"\n")); err != nil {
+		return false, err
+	}
+	// An empty record means the fingerprint predates this feature (or this is the
+	// first deploy); adopt it silently rather than forcing a restart.
+	return recorded != "" && recorded != fingerprint, nil
+}
+
 // restartChangedServices restarts services whose images or config changed.
 // Dispatch logic:
 //   - exposed + non-replicated → slot-based deploy (zero downtime)
@@ -789,13 +840,14 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 //   - non-exposed + replicated + health → rolling restart (existing)
 //   - otherwise → restart in place
 //
-// The special "__proxy__" sentinel triggers a proxy restart (only when static config changed).
+// The special "__proxy__" sentinel triggers a proxy restart (static config or
+// TLS certificate content changed).
 func (a *App) restartChangedServices(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, changed []string, allServices map[string]ServiceConfig, activeSlots map[string]string) (map[string]bool, error) {
 	slotDeployed := map[string]bool{}
 	for _, name := range changed {
 		if name == "__proxy__" {
 			proxyUnit := a.proxy().ServiceUnit(cfg.Name)
-			sp := startSpinner(a.Stdout, "restarting proxy (entrypoints changed)")
+			sp := startSpinner(a.Stdout, "restarting proxy (entrypoints or certificates changed)")
 			exec.Run(ctx, fmt.Sprintf(a.sctl()+" restart %s", shellQuote(proxyUnit)))
 			sp.stop()
 			continue

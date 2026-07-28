@@ -393,7 +393,17 @@ func decodeTLS(raw any) TLSConfig {
 		tls.Port = port
 	}
 	tls.CertsDir = getString(m, "certs_dir")
-	tls.ServerName = getString(m, "server_name")
+	names := asStringSlice(m["server_name"])
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		tls.ServerNames = append(tls.ServerNames, n)
+	}
+	if len(tls.ServerNames) > 0 {
+		tls.ServerName = tls.ServerNames[0]
+	}
 	return tls
 }
 

@@ -1,6 +1,8 @@
 package qqd
 
 import (
+	"context"
+	"io"
 	"strings"
 	"testing"
 )
@@ -630,5 +632,136 @@ func TestGenerateTraefikDynamicReplicaExclusionTCP(t *testing.T) {
 	}
 	if !strings.Contains(got, "\"proj-db-2:5432\"") {
 		t.Fatalf("replica 2 should be present in TCP:\n%s", got)
+	}
+}
+
+func TestGenerateTraefikDynamicTLSMultipleServerNames(t *testing.T) {
+	services := map[string]ServiceConfig{"frontend": {Image: "frontend:1.0"}}
+	expose := ExposeConfig{Entries: []ExposeEntry{
+		{
+			HostPort: 80,
+			Routes:   map[string]string{"/": "frontend:80"},
+			TLS: &TLSConfig{
+				Port:        443,
+				CertsDir:    "/etc/letsencrypt",
+				ServerName:  "primary.example.com",
+				ServerNames: []string{"primary.example.com", "alias.example.com"},
+			},
+		},
+	}}
+	got := generateTraefikDynamic("proj", services, expose)
+	// Both hostnames redirect to HTTPS.
+	wantRule := "rule: \"HostRegexp(`primary.example.com`) || HostRegexp(`alias.example.com`)\""
+	if !strings.Contains(got, wantRule) {
+		t.Fatalf("redirect router should cover every server name:\n%s", got)
+	}
+	// One certificate, looked up by the primary name only.
+	if strings.Count(got, "certFile:") != 1 {
+		t.Fatalf("expected exactly one certificate entry:\n%s", got)
+	}
+	if !strings.Contains(got, "live/primary.example.com/fullchain.pem") {
+		t.Fatalf("certificate should resolve from the primary server name:\n%s", got)
+	}
+	if strings.Contains(got, "live/alias.example.com/") {
+		t.Fatalf("alias must not get its own certificate path:\n%s", got)
+	}
+}
+
+func TestGenerateTraefikDynamicTLSSingleServerNameRuleUnchanged(t *testing.T) {
+	services := map[string]ServiceConfig{"frontend": {Image: "frontend:1.0"}}
+	expose := ExposeConfig{Entries: []ExposeEntry{
+		{
+			HostPort: 80,
+			Routes:   map[string]string{"/": "frontend:80"},
+			TLS: &TLSConfig{
+				Port:       443,
+				CertsDir:   "/etc/letsencrypt",
+				ServerName: "example.com",
+			},
+		},
+	}}
+	got := generateTraefikDynamic("proj", services, expose)
+	if !strings.Contains(got, "rule: \"HostRegexp(`example.com`)\"") {
+		t.Fatalf("single-name redirect rule should stay a bare HostRegexp:\n%s", got)
+	}
+}
+
+func TestSyncTLSFingerprintRestartsProxyOnCertChange(t *testing.T) {
+	expose := ExposeConfig{Entries: []ExposeEntry{
+		{
+			HostPort: 80,
+			Routes:   map[string]string{"/": "frontend:80"},
+			TLS: &TLSConfig{
+				Port:       443,
+				CertsDir:   "/etc/letsencrypt",
+				ServerName: "primary.example.com",
+			},
+		},
+	}}
+	certPath := "/etc/letsencrypt/live/primary.example.com/fullchain.pem"
+	statePath := tlsFingerprintPath("proj")
+	app := &App{Stdout: io.Discard}
+	exec := newMockExecutor("t")
+	exec.files = map[string]string{certPath: "old-chain"}
+
+	// First deploy records the fingerprint without forcing a restart.
+	changed, err := app.syncTLSFingerprint(context.Background(), exec, "proj", expose, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("first deploy should adopt the fingerprint, not restart the proxy")
+	}
+	if exec.files[statePath] == "" {
+		t.Fatalf("fingerprint should be recorded at %s", statePath)
+	}
+
+	// Unchanged certificate: no restart.
+	changed, err = app.syncTLSFingerprint(context.Background(), exec, "proj", expose, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("unchanged certificate should not restart the proxy")
+	}
+
+	// Re-issued certificate (e.g. renewal, or a hostname added): restart.
+	exec.files[certPath] = "new-chain-with-two-sans"
+	changed, err = app.syncTLSFingerprint(context.Background(), exec, "proj", expose, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("re-issued certificate should restart the proxy")
+	}
+	// The new fingerprint is now the recorded one, so the next deploy is quiet.
+	changed, err = app.syncTLSFingerprint(context.Background(), exec, "proj", expose, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("fingerprint should have been updated after the restart")
+	}
+}
+
+func TestSyncTLSFingerprintNoTLSOrMissingCert(t *testing.T) {
+	app := &App{Stdout: io.Discard}
+	plain := ExposeConfig{Entries: []ExposeEntry{{HostPort: 80, Routes: map[string]string{"/": "frontend:80"}}}}
+	changed, err := app.syncTLSFingerprint(context.Background(), newMockExecutor("t"), "proj", plain, false)
+	if err != nil || changed {
+		t.Fatalf("plain HTTP expose should be a no-op: changed=%v err=%v", changed, err)
+	}
+
+	withTLS := ExposeConfig{Entries: []ExposeEntry{
+		{
+			HostPort: 80,
+			Routes:   map[string]string{"/": "frontend:80"},
+			TLS:      &TLSConfig{Port: 443, CertsDir: "/certs", ServerName: "example.com"},
+		},
+	}}
+	// Certificate not on the target yet: leave the proxy alone.
+	changed, err = app.syncTLSFingerprint(context.Background(), newMockExecutor("t"), "proj", withTLS, false)
+	if err != nil || changed {
+		t.Fatalf("missing certificate should be a no-op: changed=%v err=%v", changed, err)
 	}
 }

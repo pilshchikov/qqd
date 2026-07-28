@@ -62,7 +62,21 @@ type ResourceConfig struct {
 type TLSConfig struct {
 	Port       int    `qqd:"key=port;required=no;default=443;desc=HTTPS listen port."`
 	CertsDir   string `qqd:"key=certs_dir;required=yes;desc=Host directory containing the certificate files."`
-	ServerName string `qqd:"key=server_name;required=yes;desc=Domain name for SNI and certificate lookup."`
+	ServerName string `qqd:"key=server_name;required=yes;type=string or list;desc=Domain name for SNI and certificate lookup. A list declares several hostnames served by one certificate; the first entry is the certificate directory name under <certs_dir>/live/."`
+	// ServerNames holds every hostname from server_name (primary first). Filled
+	// by decodeTLS; ServerName stays the primary used for certificate lookup.
+	ServerNames []string `qqd:"-"`
+}
+
+// hostNames returns all hostnames this TLS entry answers for, primary first.
+func (t TLSConfig) hostNames() []string {
+	if len(t.ServerNames) > 0 {
+		return t.ServerNames
+	}
+	if t.ServerName != "" {
+		return []string{t.ServerName}
+	}
+	return nil
 }
 
 // ExposeEntry describes one host-port listener in the centralized expose block.

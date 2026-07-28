@@ -2,6 +2,7 @@ package qqd
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -308,6 +309,18 @@ func (m *mockExecutor) Run(_ context.Context, cmd string) (string, error) {
 			}
 		}
 		sort.Strings(lines)
+		return strings.Join(lines, "\n"), nil
+	}
+	// Handle sha256sum over one or more quoted paths (TLS fingerprinting)
+	if strings.HasPrefix(cmd, "sha256sum ") {
+		var lines []string
+		for _, path := range sortedKeys(m.files) {
+			if !strings.Contains(cmd, path) {
+				continue
+			}
+			sum := sha256.Sum256([]byte(m.files[path]))
+			lines = append(lines, fmt.Sprintf("%x  %s", sum, path))
+		}
 		return strings.Join(lines, "\n"), nil
 	}
 	// Handle file reads
