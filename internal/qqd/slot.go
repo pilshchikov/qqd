@@ -96,6 +96,7 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 	}
 	if _, err := exec.Run(ctx, fmt.Sprintf(a.sctl()+" start %s", shellQuote(newUnit))); err != nil {
 		sp.stop()
+		a.captureSlotFailure(ctx, exec, newUnit, newContainer)
 		cleanupNewSlot()
 		deployed = true // cleanup already done, skip defer
 		return fmt.Errorf("start new slot %s: %w", newSlot, err)
@@ -107,6 +108,7 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 	if err := a.waitForReady(ctx, exec, newContainer, svc); err != nil {
 		sp.stop()
 		fmt.Fprintf(a.Stdout, "  error: new %s slot failed readiness, rolling back\n", newSlot)
+		a.captureSlotFailure(ctx, exec, newUnit, newContainer)
 		cleanupNewSlot()
 		deployed = true // cleanup already done, skip defer
 		return fmt.Errorf("new slot %s not ready: %w", newSlot, err)
@@ -143,40 +145,14 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 		oldDep = fmt.Sprintf("%s-%s-%s.service", project, serviceName, currentSlot) // old slot unit
 	}
 	newDep := fmt.Sprintf("%s-%s-%s.service", project, serviceName, newSlot)
-	needReload := false
-	for depName, depSvc := range allServices {
-		for _, d := range depSvc.DependsOn {
-			if d != serviceName {
-				continue
-			}
-			// Find quadlet file(s) for this dependent service. If the dependent
-			// is itself slotted, its file is at proj-<svc>-<hash>.container, not
-			// the standard proj-<svc>.container path.
-			var depPaths []string
-			if isReplicated(depSvc) {
-				for i := 1; i <= effectiveReplicas(depSvc); i++ {
-					depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s-%d%s", qdDir, project, depName, i, unitExt))
-				}
-			} else if depSlot, ok := activeSlots[depName]; ok && depSlot != "" {
-				depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s-%s%s", qdDir, project, depName, depSlot, unitExt))
-			} else {
-				depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s%s", qdDir, project, depName, unitExt))
-			}
-			for _, depPath := range depPaths {
-				content, err := exec.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null || true", depPath))
-				if err != nil || content == "" {
-					continue
-				}
-				updated := strings.ReplaceAll(content, oldDep, newDep)
-				if updated != content {
-					exec.Run(ctx, remoteWriteCmd(depPath, updated))
-					needReload = true
-				}
-			}
-		}
-	}
-	if needReload {
-		exec.Run(ctx, a.sctl()+" daemon-reload")
+	a.rewriteDependentUnitRefs(ctx, exec, project, serviceName, oldDep, newDep, allServices, activeSlots)
+
+	// Record the move so the rest of this pass resolves this service to the slot
+	// it now occupies. Without it, a later service's dependent-quadlet rewrite
+	// looks for this service's file under the slot it just left, finds nothing,
+	// and leaves the dependent requiring a unit that is about to be torn down.
+	if activeSlots != nil {
+		activeSlots[serviceName] = newSlot
 	}
 
 	// 8. Remove old quadlet files, daemon-reload, THEN stop old containers.
@@ -210,6 +186,126 @@ func (a *App) slotDeploy(ctx context.Context, cfg ProjectConfig, eff EffectiveTa
 
 	fmt.Fprintf(a.Stdout, "  %s deployed via %s slot\n", bold(serviceName), bold(newSlot))
 	return nil
+}
+
+// rewriteDependentUnitRefs repoints every quadlet that depends on serviceName
+// from oldDep to newDep and daemon-reloads when anything changed. It must run
+// before oldDep's unit is torn down: systemd cascades the stop of a Requires=
+// target into the units requiring it, and a dependent left referencing a removed
+// unit cannot be started again at all.
+//
+// activeSlots is used to locate each dependent's own quadlet file, which lives at
+// proj-<svc>-<hash>.container when the dependent is itself slotted. It must
+// reflect the slots currently on disk, not the ones the pass started with.
+// Returns true if any file was rewritten.
+func (a *App) rewriteDependentUnitRefs(ctx context.Context, exec Executor, project, serviceName, oldDep, newDep string, allServices map[string]ServiceConfig, activeSlots map[string]string) bool {
+	qdDir := a.rt().UnitDir()
+	unitExt := a.rt().UnitExtension()
+	changed := false
+	for _, depName := range sortedKeys(allServices) {
+		depSvc := allServices[depName]
+		if !contains(depSvc.DependsOn, serviceName) {
+			continue
+		}
+		var depPaths []string
+		if isReplicated(depSvc) {
+			for i := 1; i <= effectiveReplicas(depSvc); i++ {
+				depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s-%d%s", qdDir, project, depName, i, unitExt))
+			}
+		} else if depSlot, ok := activeSlots[depName]; ok && depSlot != "" {
+			depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s-%s%s", qdDir, project, depName, depSlot, unitExt))
+		} else {
+			depPaths = append(depPaths, fmt.Sprintf("%s/%s-%s%s", qdDir, project, depName, unitExt))
+		}
+		for _, depPath := range depPaths {
+			content, err := exec.Run(ctx, fmt.Sprintf("cat %s 2>/dev/null || true", depPath))
+			if err != nil || content == "" {
+				continue
+			}
+			updated := strings.ReplaceAll(content, oldDep, newDep)
+			if updated != content {
+				exec.Run(ctx, remoteWriteCmd(depPath, updated))
+				changed = true
+			}
+		}
+	}
+	if changed {
+		exec.Run(ctx, a.sctl()+" daemon-reload")
+	}
+	return changed
+}
+
+// realignDependentSlotRefs repoints dependent quadlets from the slots a failed
+// forward deploy left behind to the slots an auto-rollback is about to restore.
+// It runs before the rollback tears the abandoned slots down, so the systemd
+// Requires= cascade never fires and every dependent ends up referencing a unit
+// that exists.
+func (a *App) realignDependentSlotRefs(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, rollbackServices map[string]ServiceConfig, changed []string) {
+	if sel := a.lifecycleFor(ctx, eff.Target, exec); sel.Backend == "direct" {
+		return // no quadlets, no slot units
+	}
+	fullEff, err := resolveTarget(cfg, eff.Target.Name, nil)
+	if err != nil {
+		return
+	}
+	allServices := fullEff.Services
+	qdDir := a.rt().UnitDir()
+	unitExt := a.rt().UnitExtension()
+
+	activeSlots := map[string]string{}
+	for name, svc := range allServices {
+		if !isServiceHTTPExposed(name, eff.Expose) || isReplicated(svc) {
+			continue
+		}
+		if slot := detectActiveSlot(ctx, exec, cfg.Name, name, qdDir, unitExt, a.sctl()); slot != "" {
+			activeSlots[name] = slot
+		}
+	}
+
+	for _, svcName := range changed {
+		svc, ok := rollbackServices[svcName]
+		if !ok || !isServiceHTTPExposed(svcName, eff.Expose) || isReplicated(svc) {
+			continue
+		}
+		abandoned := activeSlots[svcName]
+		restored := slotHash(svc.Image)
+		if abandoned == "" || abandoned == restored {
+			continue
+		}
+		oldDep := fmt.Sprintf("%s-%s-%s.service", cfg.Name, svcName, abandoned)
+		newDep := fmt.Sprintf("%s-%s-%s.service", cfg.Name, svcName, restored)
+		if a.rewriteDependentUnitRefs(ctx, exec, cfg.Name, svcName, oldDep, newDep, allServices, activeSlots) {
+			fmt.Fprintf(a.Stdout, "  repointed dependents of %s at slot %s\n", bold(svcName), bold(restored))
+		}
+	}
+}
+
+// captureSlotFailure records why a slot failed while the evidence still exists.
+// Slot units run `podman run --rm`, so stopping the unit reaps the container and
+// any later `podman logs` only reports "no such container"; the unit journal is
+// the fallback.
+func (a *App) captureSlotFailure(ctx context.Context, exec Executor, unit, container string) {
+	if out, err := exec.Run(ctx, fmt.Sprintf(a.crt()+" logs --tail 40 %s 2>&1 || true", shellQuote(container))); err == nil {
+		if out = strings.TrimSpace(out); out != "" && !containerMissing(out) {
+			fmt.Fprintf(a.Stdout, "[%s logs %s]\n%s\n", a.crt(), container, out)
+			return
+		}
+	}
+	if out, err := exec.Run(ctx, fmt.Sprintf("%s -u %s --no-pager -n 40 2>&1 || true", journalPrefix(a.sctl()), shellQuote(unit))); err == nil && strings.TrimSpace(out) != "" {
+		fmt.Fprintf(a.Stdout, "[journal %s]\n%s\n", unit, strings.TrimSpace(out))
+	}
+}
+
+// containerMissing reports whether runtime output is the "container is gone"
+// error rather than actual container output.
+func containerMissing(out string) bool {
+	return strings.Contains(out, "no such container") || strings.Contains(out, "no container with name")
+}
+
+// journalPrefix derives the journalctl invocation matching a systemctl prefix,
+// so a rootless ("systemctl --user") target is queried with "journalctl --user".
+func journalPrefix(sctl string) string {
+	return strings.Replace(sctl, "systemctl", "journalctl", 1)
 }
 
 // slotHash returns an 8-character hex hash derived from the image string.

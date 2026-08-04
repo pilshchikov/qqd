@@ -41,6 +41,10 @@ Failure modes:
 
 `qqd rollback` restores the previous release: image tags, generated unit files, proxy config. See [docs/limitations.md](limitations.md#rollback-scope) for what rollback does not restore.
 
+Auto-rollback also repoints dependents. A rolled-back blue-green service moves back to the slot the previous release occupied, so before the abandoned slot is torn down every `depends_on` dependent's unit file is rewritten to reference the restored slot unit and systemd is reloaded. Without that, systemd's `Requires=` cascade stops the dependents along with the abandoned slot and then refuses to start them, because the unit they require no longer exists.
+
+When a rollback completes and verifies, the deploy still exits non-zero, but the reported error names the restored release rather than a unit from the abandoned slots - that unit no longer exists and has nothing left to inspect. The original failure is printed above it, with the diagnostics collected while the failing container was still alive.
+
 Failure modes:
 - If the previous image has been deleted from the registry and the local cache, rollback will fail at the pull step. `qqd clean` is aggressive about removing unused images - use `--keep-images N` if you rely on rollback to old releases.
 - Auto-rollback triggers when a deploy fails between unit start and health check. If `qqd` itself crashes (panic, killed mid-deploy, lost SSH), there is no rollback. The target is left in whatever state the last completed step put it in.
@@ -66,7 +70,7 @@ What happens when each step of `deploy` fails:
 | Image build | Aborts; previous services still running | Inspect build output; fix Dockerfile |
 | Image pull | Aborts; previous services still running | Check registry auth; check network |
 | Unit file write | Atomic write fails or is incomplete | Should not happen; file a bug |
-| Service start | Auto-rollback to previous image and units | Check `journalctl --user -u <unit>` |
+| Service start | Auto-rollback to previous image and units, dependents repointed at the restored slots | Check `journalctl --user -u <unit>` |
 | Health check timeout | Auto-rollback where a previous release exists; otherwise the service is marked failed | Inspect logs; verify health endpoint |
 | Proxy reload | Service is healthy but traffic may be wrong | Restart proxy container manually if stuck |
 | `qqd` killed mid-deploy (Ctrl+C, SIGKILL) | No cleanup runs. Target left in the state of the last completed step | Inspect with `qqd status`; resume with `qqd deploy` (idempotent) |

@@ -27,6 +27,7 @@ type mockExecutor struct {
 	healthStatus  map[string]string        // container name -> health status
 	files         map[string]string        // path -> content (simulates remote filesystem)
 	unitStates    map[string]string        // unit name -> state (overrides default "active")
+	stdoutFor     map[string]string        // cmd substring -> canned stdout
 	containers    map[string]containerSnap // direct-mode: containers seen via `podman run -d --name X`
 }
 
@@ -43,6 +44,7 @@ func newMockExecutor(id string) *mockExecutor {
 		imageUsers:    map[string]string{},
 		failCmds:      map[string]int{},
 		healthStatus:  map[string]string{},
+		stdoutFor:     map[string]string{},
 		files:         map[string]string{},
 		containers:    map[string]containerSnap{},
 	}
@@ -107,6 +109,11 @@ func (m *mockExecutor) Run(_ context.Context, cmd string) (string, error) {
 				delete(m.failCmds, pattern)
 			}
 			return "", fmt.Errorf("simulated failure: %s", pattern)
+		}
+	}
+	for pattern, out := range m.stdoutFor {
+		if strings.Contains(cmd, pattern) {
+			return out, nil
 		}
 	}
 	if strings.Contains(cmd, "podman inspect --format '{{.State.Health.Status}}'") {
@@ -5125,5 +5132,292 @@ func TestDeployAutoRollbackSlotBased(t *testing.T) {
 	oldSlotStartCmd := fmt.Sprintf("start 'app-server-%s.service'", oldHash)
 	if !strings.Contains(cmds, oldSlotStartCmd) {
 		t.Fatalf("expected old slot start command, got:\n%s", cmds)
+	}
+}
+
+// rollbackDepsFixture builds a two-service project ("server" plus "mcp", which
+// depends on it) where both are HTTP-exposed and therefore slot-deployed, both
+// images move forward, and the forward deploy fails its final verification —
+// forcing an auto-rollback that has to move both services back a slot.
+type rollbackDepsFixture struct {
+	exec                     *mockExecutor
+	cfg                      ProjectConfig
+	app                      *App
+	oldServerHash, newServer string
+	oldMcpHash, newMcpHash   string
+}
+
+func newRollbackDepsFixture(t *testing.T) rollbackDepsFixture {
+	t.Helper()
+	const (
+		oldServerImage = "ghcr.io/acme/proj/server:1.0"
+		newServerImage = "ghcr.io/acme/proj/server:2.0"
+		oldMcpImage    = "ghcr.io/acme/proj/mcp:1.0"
+		newMcpImage    = "ghcr.io/acme/proj/mcp:2.0"
+	)
+	f := rollbackDepsFixture{
+		exec:          newMockExecutor("target-main"),
+		oldServerHash: slotHash(oldServerImage),
+		newServer:     slotHash(newServerImage),
+		oldMcpHash:    slotHash(oldMcpImage),
+		newMcpHash:    slotHash(newMcpImage),
+	}
+
+	oldServerSvc := ServiceConfig{Image: oldServerImage, Dockerfile: "Dockerfile"}
+	oldMcpSvc := ServiceConfig{Image: oldMcpImage, Dockerfile: "Dockerfile.mcp", DependsOn: []string{"server"}}
+	existing := map[string]string{"server": f.oldServerHash, "mcp": f.oldMcpHash}
+	f.exec.files[fmt.Sprintf("%s/proj-server-%s.container", testQdDir, f.oldServerHash)] =
+		renderExpectedSlotContent("proj", "server", f.oldServerHash, oldServerSvc, existing, PodmanRuntime{})
+	f.exec.files[fmt.Sprintf("%s/proj-mcp-%s.container", testQdDir, f.oldMcpHash)] =
+		renderExpectedSlotContent("proj", "mcp", f.oldMcpHash, oldMcpSvc, existing, PodmanRuntime{})
+
+	f.exec.files["~/.config/qqd/proj/releases/20260417-100000.000.json"] = fmt.Sprintf(
+		`{"id":"20260417-100000.000","timestamp":"2026-04-17T10:00:00Z","services":{"server":%q,"mcp":%q}}`,
+		oldServerImage, oldMcpImage)
+
+	// Only the previous images exist, so both services build (and count as
+	// changed) on the forward deploy and are pullable on the way back.
+	for _, img := range []string{oldServerImage, oldMcpImage} {
+		f.exec.existingImage[img] = true
+		f.exec.imageIDs[img] = "sha256:" + slotHash(img)
+	}
+
+	// The new mcp slot starts but never becomes active: the forward deploy gets
+	// all the way to verification and fails there, exactly as a dependent
+	// stopped by a systemd Requires= cascade would.
+	f.exec.unitStates = map[string]string{
+		fmt.Sprintf("proj-mcp-%s.service", f.newMcpHash): "inactive",
+	}
+
+	f.cfg = ProjectConfig{
+		Name:  "proj",
+		Repo:  "git@github.com:acme/proj.git",
+		Build: BuildConfig{Strategy: "local"},
+		Services: map[string]ServiceConfig{
+			"server": {Image: newServerImage, Dockerfile: "Dockerfile"},
+			"mcp":    {Image: newMcpImage, Dockerfile: "Dockerfile.mcp", DependsOn: []string{"server"}},
+		},
+		Targets: map[string]TargetConfig{
+			"main": {
+				Name: "main", Host: "192.0.2.30", User: "u", RepoDir: "/repo",
+				Expose: ExposeConfig{Entries: []ExposeEntry{
+					{HostPort: 80, Routes: map[string]string{"/mcp": "mcp:8989", "/": "server:8080"}},
+				}},
+			},
+		},
+	}
+	f.app = &App{
+		ExecFactory: mockFactory{targets: map[string]*mockExecutor{"main": f.exec}, local: newMockExecutor("local")},
+		Stdout:      io.Discard, DrainWait: -1,
+	}
+	return f
+}
+
+// TestAutoRollbackRepointsDependentQuadletsAtRestoredSlot covers the failure
+// mode where a rollback moved both a service and its dependent back a slot, but
+// left the dependent's quadlet requiring the forward attempt's slot — which the
+// rollback then removed. systemd cascaded the stop into the dependent and
+// afterwards refused to start it, because the unit it required no longer existed.
+//
+// After a rollback every dependent must reference a unit that exists.
+func TestAutoRollbackRepointsDependentQuadletsAtRestoredSlot(t *testing.T) {
+	f := newRollbackDepsFixture(t)
+
+	if err := f.app.Deploy(context.Background(), f.cfg, "main", nil, false); err == nil {
+		t.Fatal("expected the deploy to fail so the auto-rollback runs")
+	}
+
+	restoredMcp := fmt.Sprintf("%s/proj-mcp-%s.container", testQdDir, f.oldMcpHash)
+	mcpQuadlet, ok := f.exec.files[restoredMcp]
+	if !ok {
+		t.Fatalf("rollback should restore the mcp slot quadlet %s; files: %v", restoredMcp, keysOf(f.exec.files))
+	}
+	restoredServerUnit := fmt.Sprintf("proj-server-%s.service", f.oldServerHash)
+	if !strings.Contains(mcpQuadlet, "Requires="+restoredServerUnit) {
+		t.Fatalf("mcp must require the restored server slot (%s):\n%s", restoredServerUnit, mcpQuadlet)
+	}
+	abandonedServerUnit := fmt.Sprintf("proj-server-%s.service", f.newServer)
+	if strings.Contains(mcpQuadlet, abandonedServerUnit) {
+		t.Fatalf("mcp must not reference the torn-down server slot (%s):\n%s", abandonedServerUnit, mcpQuadlet)
+	}
+
+	// The unit mcp now requires has to actually exist on the target.
+	restoredServerQuadlet := fmt.Sprintf("%s/proj-server-%s.container", testQdDir, f.oldServerHash)
+	if _, ok := f.exec.files[restoredServerQuadlet]; !ok {
+		t.Fatalf("mcp requires %s but its quadlet is missing; files: %v", restoredServerUnit, keysOf(f.exec.files))
+	}
+	if _, ok := f.exec.files[fmt.Sprintf("%s/proj-server-%s.container", testQdDir, f.newServer)]; ok {
+		t.Fatal("the abandoned server slot quadlet should have been removed by the rollback")
+	}
+
+	// The rewrite has to be visible to systemd before the units are (re)started.
+	cmds := f.exec.commands
+	writeIdx, reloadIdx := -1, -1
+	for i, c := range cmds {
+		switch {
+		case writeIdx == -1 && strings.HasPrefix(c, "cat > "+restoredMcp+" ") && strings.Contains(c, restoredServerUnit):
+			writeIdx = i
+		case writeIdx != -1 && reloadIdx == -1 && strings.Contains(c, "daemon-reload"):
+			reloadIdx = i
+		}
+	}
+	if writeIdx == -1 || reloadIdx == -1 {
+		t.Fatalf("expected the repointed mcp quadlet to be written and followed by a daemon-reload:\n%s", strings.Join(cmds, "\n"))
+	}
+}
+
+// TestAutoRollbackErrorNamesRestoredStateNotAbandonedSlot covers a successful
+// rollback being reported with the failed forward attempt's slot unit — a unit
+// that no longer exists on the target, has no journal, and sends the operator
+// looking for a container that was never left behind.
+func TestAutoRollbackErrorNamesRestoredStateNotAbandonedSlot(t *testing.T) {
+	f := newRollbackDepsFixture(t)
+
+	err := f.app.Deploy(context.Background(), f.cfg, "main", nil, false)
+	if err == nil {
+		t.Fatal("expected the deploy to fail so the auto-rollback runs")
+	}
+	if !strings.Contains(err.Error(), "rolled back to release 20260417-100000.000") {
+		t.Fatalf("a completed rollback must be reported as such, got: %v", err)
+	}
+	for _, abandoned := range []string{f.newMcpHash, f.newServer} {
+		if strings.Contains(err.Error(), abandoned) {
+			t.Fatalf("error names slot %s, which the rollback tore down: %v", abandoned, err)
+		}
+	}
+}
+
+// TestVerifySlottedUnitNamesCurrentSlot covers the verification pass reporting a
+// slot name from the map it computed before the pass instead of the slot the
+// service actually occupies now.
+func TestVerifySlottedUnitNamesCurrentSlot(t *testing.T) {
+	targetExec := newMockExecutor("target-main")
+	oldImage := "ghcr.io/acme/proj/server:1.0"
+	newImage := "ghcr.io/acme/proj/server:2.0"
+	oldHash, newHash := slotHash(oldImage), slotHash(newImage)
+
+	oldSvc := ServiceConfig{Image: oldImage, Dockerfile: "Dockerfile"}
+	targetExec.files[fmt.Sprintf("%s/proj-server-%s.container", testQdDir, oldHash)] =
+		renderExpectedSlotContent("proj", "server", oldHash, oldSvc, map[string]string{"server": oldHash}, PodmanRuntime{})
+	targetExec.existingImage[oldImage] = true
+	targetExec.imageIDs[oldImage] = "sha256:old"
+	// The new slot starts but never goes active, and there is no release to roll
+	// back to, so the deploy error is the raw verification failure.
+	targetExec.unitStates = map[string]string{
+		fmt.Sprintf("proj-server-%s.service", newHash): "inactive",
+	}
+
+	cfg := ProjectConfig{
+		Name:  "proj",
+		Repo:  "git@github.com:acme/proj.git",
+		Build: BuildConfig{Strategy: "local"},
+		Services: map[string]ServiceConfig{
+			"server": {Image: newImage, Dockerfile: "Dockerfile"},
+		},
+		Targets: map[string]TargetConfig{
+			"main": {
+				Name: "main", Host: "192.0.2.31", User: "u", RepoDir: "/repo",
+				Expose: ExposeConfig{Entries: []ExposeEntry{
+					{HostPort: 80, Routes: map[string]string{"/": "server:8080"}},
+				}},
+			},
+		},
+	}
+	app := &App{
+		ExecFactory: mockFactory{targets: map[string]*mockExecutor{"main": targetExec}, local: newMockExecutor("local")},
+		Stdout:      io.Discard, DrainWait: -1,
+	}
+
+	err := app.Deploy(context.Background(), cfg, "main", nil, false)
+	if err == nil {
+		t.Fatal("expected the deploy to fail verification")
+	}
+	if !strings.Contains(err.Error(), newHash) {
+		t.Fatalf("verification must name the slot in effect (%s), got: %v", newHash, err)
+	}
+	if strings.Contains(err.Error(), oldHash) {
+		t.Fatalf("verification must not name the slot the service left (%s), got: %v", oldHash, err)
+	}
+}
+
+// TestDiagnoseUnitFallsBackToJournalWhenContainerReaped covers slot units running
+// `podman run --rm`: by the time a failure is diagnosed the container is gone, so
+// `podman logs` returns "no such container" and the only evidence left is the
+// unit journal. Printing the runtime's own error instead loses the cause of the
+// failure for good.
+func TestDiagnoseUnitFallsBackToJournalWhenContainerReaped(t *testing.T) {
+	exec := newMockExecutor("target-main")
+	unit, cname := "proj-svc-a1b2c3d4.service", "proj-svc-a1b2c3d4"
+	exec.unitStates = map[string]string{unit: "inactive"}
+	exec.stdoutFor["podman logs"] = `Error: no container with name or ID "` + cname + `" found: no such container`
+	exec.stdoutFor["journalctl --user -u"] = "svc: listen tcp :8080: bind: address already in use"
+
+	out := &strings.Builder{}
+	app := &App{Runtime: PodmanRuntime{}, Stdout: out}
+	app.diagnoseUnit(context.Background(), exec, "svc", unit, cname, ServiceConfig{})
+
+	if !strings.Contains(out.String(), "address already in use") {
+		t.Fatalf("expected the unit journal as fallback evidence, got:\n%s", out)
+	}
+	if strings.Contains(out.String(), "no such container") {
+		t.Fatalf("the runtime's 'container is gone' error is not diagnostics:\n%s", out)
+	}
+}
+
+// TestDiagnoseUnitPrefersContainerLogs keeps the journal fallback from displacing
+// real container output when the container is still around.
+func TestDiagnoseUnitPrefersContainerLogs(t *testing.T) {
+	exec := newMockExecutor("target-main")
+	unit, cname := "proj-svc-a1b2c3d4.service", "proj-svc-a1b2c3d4"
+	exec.unitStates = map[string]string{unit: "failed"}
+	exec.stdoutFor["podman logs"] = "panic: config: missing DATABASE_URL"
+
+	out := &strings.Builder{}
+	app := &App{Runtime: PodmanRuntime{}, Stdout: out}
+	app.diagnoseUnit(context.Background(), exec, "svc", unit, cname, ServiceConfig{})
+
+	if !strings.Contains(out.String(), "missing DATABASE_URL") {
+		t.Fatalf("expected container logs, got:\n%s", out)
+	}
+	for _, c := range exec.commands {
+		if strings.Contains(c, "journalctl") {
+			t.Fatalf("journal is only a fallback; container logs were available:\n%s", strings.Join(exec.commands, "\n"))
+		}
+	}
+}
+
+// TestSlotDeployCapturesFailureBeforeContainerIsReaped covers diagnostics for a
+// slot that never became ready: the evidence has to be collected before the unit
+// is stopped, because `--rm` removes the container with it.
+func TestSlotDeployCapturesFailureBeforeContainerIsReaped(t *testing.T) {
+	exec := newMockExecutor("target-main")
+	image := "ghcr.io/acme/proj/server:2.0"
+	hash := slotHash(image)
+	unit := fmt.Sprintf("proj-server-%s.service", hash)
+	exec.failCmds = map[string]int{fmt.Sprintf("start '%s'", unit): 1}
+	exec.stdoutFor["podman logs"] = "server: exiting: bad config"
+
+	out := &strings.Builder{}
+	app := &App{Runtime: PodmanRuntime{}, Stdout: out, DrainWait: -1}
+	cfg := ProjectConfig{Name: "proj", Services: map[string]ServiceConfig{"server": {Image: image}}}
+	eff := EffectiveTarget{Target: TargetConfig{Name: "main"}, Services: cfg.Services}
+	err := app.slotDeploy(context.Background(), cfg, eff, exec, "server", cfg.Services["server"], cfg.Services, map[string]string{})
+	if err == nil {
+		t.Fatal("expected the slot start to fail")
+	}
+	if !strings.Contains(out.String(), "bad config") {
+		t.Fatalf("expected the failing container's output to be captured:\n%s", out)
+	}
+	var logsIdx, stopIdx = -1, -1
+	for i, c := range exec.commands {
+		if logsIdx == -1 && strings.Contains(c, "podman logs") {
+			logsIdx = i
+		}
+		if stopIdx == -1 && strings.Contains(c, "stop '"+unit+"'") {
+			stopIdx = i
+		}
+	}
+	if logsIdx == -1 || stopIdx == -1 || logsIdx > stopIdx {
+		t.Fatalf("logs must be captured before the unit is stopped (logs=%d stop=%d):\n%s", logsIdx, stopIdx, strings.Join(exec.commands, "\n"))
 	}
 }

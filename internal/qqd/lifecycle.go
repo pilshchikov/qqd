@@ -932,8 +932,15 @@ func (a *App) diagnoseUnit(ctx context.Context, exec Executor, label, unit, cnam
 		fmt.Fprintf(a.Stdout, "[systemctl status]\n%s\n", strings.TrimSpace(status))
 	}
 
-	if logs, err := exec.Run(ctx, fmt.Sprintf(a.crt()+" logs --tail 30 %s 2>&1 || true", shellQuote(cname))); err == nil && strings.TrimSpace(logs) != "" {
-		fmt.Fprintf(a.Stdout, "[podman logs]\n%s\n", strings.TrimSpace(logs))
+	// Slot units run with --rm, so a failed container is usually already reaped
+	// by the time we get here and `podman logs` only reports "no such
+	// container". Fall back to the unit journal, which still holds its output.
+	logs, err := exec.Run(ctx, fmt.Sprintf(a.crt()+" logs --tail 30 %s 2>&1 || true", shellQuote(cname)))
+	logs = strings.TrimSpace(logs)
+	if err == nil && logs != "" && !containerMissing(logs) {
+		fmt.Fprintf(a.Stdout, "[podman logs]\n%s\n", logs)
+	} else if j, jerr := exec.Run(ctx, fmt.Sprintf("%s -u %s --no-pager -n 40 2>&1 || true", journalPrefix(a.sctl()), shellQuote(unit))); jerr == nil && strings.TrimSpace(j) != "" {
+		fmt.Fprintf(a.Stdout, "[journal %s]\n%s\n", unit, strings.TrimSpace(j))
 	}
 
 	for _, vol := range svc.Volumes {

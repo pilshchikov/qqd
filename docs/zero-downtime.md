@@ -37,7 +37,11 @@ For HTTP-routed non-replicated services, qqd runs two containers alternately - a
 
 Blue-green only applies to **HTTP-routed** services (path routes in `expose`). TCP passthrough services restart in place since they typically have stateful or long-lived connections. Services without an `expose` entry also restart in place.
 
-If a service depends on a blue-green service (`depends_on`), its Quadlet file is automatically updated to reference the active slot unit.
+If a service depends on a blue-green service (`depends_on`), its Quadlet file is automatically updated to reference the active slot unit. The rewrite happens before the old slot is stopped - systemd cascades the stop of a `Requires=` target into its dependents - and it applies in both directions: an auto-rollback repoints dependents at the slot it restores before it tears the failed attempt's slot down. This holds when several services move slots in the same pass, including the dependents themselves.
+
+### Diagnosing a failed slot
+
+Slot containers run with `--rm`, so a container that failed is gone as soon as its unit stops. `qqd` captures the failing container's output before it cleans the slot up, and falls back to `journalctl --user -u <unit>` when the container is already reaped - so a failed deploy always leaves evidence behind.
 
 ## Rolling Restart
 

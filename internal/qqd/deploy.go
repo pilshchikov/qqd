@@ -271,7 +271,15 @@ func (a *App) Deploy(ctx context.Context, cfg ProjectConfig, targetName string, 
 			fmt.Fprintf(a.Stdout, "%s installing quadlet files and starting services on %s\n", boldCyan("[deploy]"), dim(eff.Target.Host))
 			fullDeploy := len(cliServices) == 0
 			if err := a.installAndStart(ctx, cfg, eff, exec, false, changed, fullDeploy); err != nil {
-				a.attemptAutoRollback(ctx, cfg, eff, exec, fullDeploy)
+				// The failure was already diagnosed and printed against the state
+				// it happened in. If the rollback restored (and verified) the
+				// previous release, that state is gone, so the returned error must
+				// describe the restored target instead of naming units from the
+				// abandoned slots.
+				if relID, rolledBack := a.attemptAutoRollback(ctx, cfg, eff, exec, fullDeploy); rolledBack {
+					fmt.Fprintf(a.Stdout, "  %s %s\n", dim("original failure:"), err)
+					return fmt.Errorf("deploy failed, rolled back to release %s", relID)
+				}
 				return err
 			}
 			// Save release before post_deploy hook so a successful deploy is always recorded
@@ -660,15 +668,18 @@ func (a *App) installAndStart(ctx context.Context, cfg ProjectConfig, eff Effect
 			}
 		}
 	}
-	// Also verify slotted services that have active slots
-	for svcName, slot := range activeSlots {
-		if slotDeployed[svcName] {
-			// slot just deployed — verify the new slot unit
-			newSlot := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension(), a.sctl())
-			if newSlot == "" {
-				continue
-			}
-			slot = newSlot
+	// Also verify slotted services that have active slots. The slot is always
+	// re-resolved from the target: activeSlots was computed before this pass
+	// started, so after a slot move (a deploy or a rollback) it names a unit that
+	// no longer exists — and reporting that name blames a unit an operator cannot
+	// even inspect.
+	for _, svcName := range sortedKeys(activeSlots) {
+		slot := activeSlots[svcName]
+		current := detectActiveSlot(ctx, targetExec, cfg.Name, svcName, qdDir, a.rt().UnitExtension(), a.sctl())
+		if current != "" {
+			slot = current
+		} else if slotDeployed[svcName] {
+			continue
 		}
 		slotUnit := fmt.Sprintf("%s-%s-%s.service", cfg.Name, svcName, slot)
 		if _, err := targetExec.Run(ctx, fmt.Sprintf(a.sctl()+" is-active %s", shellQuote(slotUnit))); err != nil {
@@ -722,15 +733,19 @@ func (a *App) annotateVolumeOwnership(ctx context.Context, exec Executor, servic
 // holds the services named on the CLI, so claiming a full deploy during the
 // rollback of a partial one would let the stale-unit pass treat every service
 // that wasn't part of `qqd deploy <svc>` as removed from the config.
-func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, fullDeploy bool) {
+//
+// Returns the restored release ID and whether the rollback completed and
+// verified, so the caller can report the restored state rather than the failure
+// state it replaced.
+func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff EffectiveTarget, exec Executor, fullDeploy bool) (string, bool) {
 	if ctx.Err() != nil {
-		return
+		return "", false
 	}
 
 	rel, ok, err := latestRelease(ctx, exec, cfg.Name)
 	if err != nil || !ok {
 		fmt.Fprintf(a.Stdout, "  %s no previous release for auto-rollback\n", yellow("warning"))
-		return
+		return "", false
 	}
 
 	fmt.Fprintf(a.Stdout, "\n%s deploy failed, rolling back to %s\n", boldYellow("[rollback]"), bold(rel.ID))
@@ -763,10 +778,10 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 		all := sortedKeys(rollbackServices)
 		if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, all, fullDeploy); err != nil {
 			fmt.Fprintf(a.Stdout, "  %s restore previous shape failed: %s\n", red("error"), err)
-			return
+			return "", false
 		}
 		fmt.Fprintf(a.Stdout, "%s previous container shape restored from release %s\n", boldGreen("rolled back"), bold(rel.ID))
-		return
+		return rel.ID, true
 	}
 
 	for _, svcName := range changed {
@@ -774,27 +789,34 @@ func (a *App) attemptAutoRollback(ctx context.Context, cfg ProjectConfig, eff Ef
 		exists, err := imageExists(ctx, exec, svc.Image, a.rt())
 		if err != nil {
 			fmt.Fprintf(a.Stdout, "  %s auto-rollback failed: %s\n", red("error"), err)
-			return
+			return "", false
 		}
 		if !exists {
 			sp := startSpinner(a.Stdout, fmt.Sprintf("pulling %s", svc.Image))
 			if err := exec.RunStream(ctx, fmt.Sprintf(a.crt()+" pull %s", shellQuote(svc.Image)), a.Stdout); err != nil {
 				sp.stop()
 				fmt.Fprintf(a.Stdout, "  %s auto-rollback pull %s: %s\n", red("error"), svc.Image, err)
-				return
+				return "", false
 			}
 			sp.stop()
 		}
 	}
 
+	// Point dependents at the slots this rollback is about to restore before the
+	// abandoned slots are torn down. Otherwise systemd cascades the stop of a
+	// removed slot into every service that requires it, and those services then
+	// refuse to start because the unit they require no longer exists.
+	a.realignDependentSlotRefs(ctx, cfg, eff, exec, rollbackServices, changed)
+
 	rollbackEff := eff
 	rollbackEff.Services = rollbackServices
 	if err := a.installAndStart(ctx, cfg, rollbackEff, exec, false, changed, fullDeploy); err != nil {
 		fmt.Fprintf(a.Stdout, "  %s auto-rollback failed: %s\n", red("error"), err)
-		return
+		return "", false
 	}
 
 	fmt.Fprintf(a.Stdout, "%s auto-rolled back to %s\n", boldGreen("rolled back"), bold(rel.ID))
+	return rel.ID, true
 }
 
 // syncTLSFingerprint hashes the certificate chains referenced by the expose
